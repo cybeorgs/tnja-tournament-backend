@@ -1,5 +1,5 @@
-// Public self-service: students register themselves (and get a permanent student ID
-// straight away — no approval, no fee), then use that ID to enter a tournament and pay
+// Public self-service: students register themselves (verifying their email by OTP) and get a permanent student ID
+// straight away — no approval, no fee. They then use that ID to enter a tournament and pay
 // its entry fee. An entry only counts once it is paid (or the tournament is free).
 import { Router } from "express";
 import { z } from "zod";
@@ -10,6 +10,8 @@ import { eligibleAgeGroups } from "../lib/categories.js";
 import { newCertificateNo, param } from "../lib/helpers.js";
 import { createStudent, studentSchema } from "../lib/students.js";
 import { TN_LOCATIONS, lookupPincode } from "../lib/locations.js";
+import { checkEmailOtp, createEmailOtp, createEmailVerifiedToken } from "../lib/emailOtp.js";
+import { sendEmailOtp } from "../lib/mailer.js";
 import { confirmEntryPayment, createEntryOrder, getRazorpay, verifySchema } from "../lib/payments.js";
 import { resolveCategory } from "./tournaments.routes.js";
 
@@ -20,17 +22,42 @@ const router = Router();
 const registerLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 20 });
 
 const registerSchema = studentSchema.and(
-  z.object({ agreedToTerms: z.literal(true, { error: "Please agree to the terms and privacy policy" }) }),
+  z.object({
+    agreedToTerms: z.literal(true, { error: "Please agree to the terms and privacy policy" }),
+    /** From POST /email-otp/verify */
+    emailVerificationToken: z.string({ error: "Please verify your email address before registering." }).min(1, "Please verify your email address before registering."),
+  }),
 );
 
 router.post("/students/register", registerLimiter, async (req, res) => {
-  const { agreedToTerms: _agreed, ...input } = registerSchema.parse(req.body);
+  const { agreedToTerms: _agreed, emailVerificationToken, ...input } = registerSchema.parse(req.body);
   // Don't reveal someone else's student ID to whoever types their Aadhaar number.
   if (await prisma.student.findUnique({ where: { aadhaarNumber: input.aadhaarNumber }, select: { id: true } })) {
     throw new HttpError(409, "This Aadhaar number is already registered. If you have lost your student ID, contact the organiser.");
   }
-  const student = await prisma.$transaction((tx) => createStudent(tx, input, "SELF"));
+  const student = await prisma.$transaction((tx) => createStudent(tx, input, emailVerificationToken, "SELF"));
   res.status(201).json({ studentNo: student.studentNo, fullName: student.fullName, email: student.email });
+});
+
+// ─── Email verification ──────────────────────────────────────────────────────
+
+const otpSendLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 8 });
+const otpVerifyLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30 });
+const emailSchema = z.email("Enter a valid email address").max(254);
+
+/** Email a 6-digit code; the returned token goes back with the code to /verify. */
+router.post("/email-otp/send", otpSendLimiter, async (req, res) => {
+  const email = emailSchema.parse(req.body?.email);
+  const { otp, token } = createEmailOtp(email);
+  await sendEmailOtp(email, otp);
+  res.json({ token });
+});
+
+router.post("/email-otp/verify", otpVerifyLimiter, async (req, res) => {
+  const { email, otp, token } = z.object({ email: emailSchema, otp: z.string().trim().regex(/^\d{6}$/, "Enter the 6-digit code"), token: z.string() }).parse(req.body);
+  const problem = checkEmailOtp(token, email, otp);
+  if (problem) throw new HttpError(400, problem);
+  res.json({ verificationToken: createEmailVerifiedToken(email) });
 });
 
 // ─── Locations ───────────────────────────────────────────────────────────────

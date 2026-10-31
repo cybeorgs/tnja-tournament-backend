@@ -4,6 +4,7 @@ import prisma from "../db.js";
 import { HttpError } from "../middleware/errors.js";
 import { getSettings } from "./helpers.js";
 import { isKnownLocation } from "./locations.js";
+import { assertEmailVerified } from "./emailOtp.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -85,8 +86,9 @@ async function nextStudentNo(tx: Tx): Promise<string> {
   return `${prefix}-S-${String(row!.n).padStart(6, "0")}`;
 }
 
-/** Create a student with a freshly issued permanent ID. */
-export async function createStudent(tx: Tx, data: StudentData, source: "ADMIN" | "SELF" = "ADMIN") {
+/** Create a student with a freshly issued permanent ID. The email must have been verified by OTP. */
+export async function createStudent(tx: Tx, data: StudentData, emailVerificationToken: unknown, source: "ADMIN" | "SELF" = "ADMIN") {
+  assertEmailVerified(emailVerificationToken, data.email);
   await assertAadhaarFree(tx, data.aadhaarNumber);
   return tx.student.create({ data: { ...data, source, studentNo: await nextStudentNo(tx) } });
 }

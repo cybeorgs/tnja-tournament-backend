@@ -20,6 +20,15 @@ export const env = {
   publicSiteUrl: process.env.PUBLIC_SITE_URL || "",
   razorpayKeyId: process.env.RAZORPAY_KEY_ID || "",
   razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || "",
+  isProduction: process.env.NODE_ENV === "production",
+  smtp: {
+    host: process.env.SMTP_HOST || "",
+    port: Number(process.env.SMTP_PORT || 587),
+    user: process.env.SMTP_USER || "",
+    pass: process.env.SMTP_PASS || "",
+    fromEmail: process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || "",
+    fromName: process.env.SMTP_FROM_NAME || "",
+  },
 };
 
 if (env.jwtSecret.length < 32) {

@@ -67,9 +67,9 @@ export async function lookupPincode(pincode: string) {
     offices = (await fetchPostOffices(pincode)).filter((o) => nameKey(o.State) === "tamilnadu");
   } catch (err) {
     console.error("Pincode lookup failed:", err);
-    throw new HttpError(502, "Could not look up this pincode right now. Please choose the district and taluk yourself.");
+    throw new HttpError(502, "Couldn't look up this pincode. Pick the district and taluk below.");
   }
-  if (!offices.length) throw new HttpError(404, "No Tamil Nadu location found for this pincode. Please choose the district and taluk yourself.");
+  if (!offices.length) throw new HttpError(404, "Pincode not found in Tamil Nadu. Pick the district and taluk below.");
 
   const blockKeys = new Set(offices.map((o) => nameKey(o.Block)));
   const matched = TN_LOCATIONS.flatMap((d) => d.taluks.filter((t) => blockKeys.has(nameKey(t))).map((taluk) => ({ taluk, district: d.district })));
@@ -88,7 +88,7 @@ export async function lookupPincode(pincode: string) {
     const postDistricts = new Set(offices.map((o) => nameKey(o.District)));
     district = TN_LOCATIONS.find((d) => postDistricts.has(nameKey(d.district)))?.district;
   }
-  if (!district) throw new HttpError(404, "Could not match this pincode to a district. Please choose the district and taluk yourself.");
+  if (!district) throw new HttpError(404, "Pincode not recognised. Pick the district and taluk below.");
 
   const taluks = [...new Set(matched.filter((m) => m.district === district).map((m) => m.taluk))].sort();
   return { pincode, district, taluks, postOffices: offices.map((o) => o.Name) };

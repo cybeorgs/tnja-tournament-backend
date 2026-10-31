@@ -5,6 +5,7 @@ import prisma from "../db.js";
 import { notFound } from "../middleware/errors.js";
 import { param } from "../lib/helpers.js";
 import { assertAadhaarFree, createStudent, studentSchema } from "../lib/students.js";
+import { assertEmailVerified } from "../lib/emailOtp.js";
 
 const listQuery = z.object({
   q: z.string().trim().optional(),
@@ -33,7 +34,7 @@ studentsRouter.get("/", async (req, res) => {
 
 studentsRouter.post("/", async (req, res) => {
   const data = studentSchema.parse(req.body);
-  const student = await prisma.$transaction((tx) => createStudent(tx, data));
+  const student = await prisma.$transaction((tx) => createStudent(tx, data, req.body?.emailVerificationToken));
   res.status(201).json(student);
 });
 
@@ -51,6 +52,9 @@ studentsRouter.get("/:id", async (req, res) => {
 studentsRouter.put("/:id", async (req, res) => {
   const id = param(req, "id");
   const data = studentSchema.parse(req.body);
+  const existing = await prisma.student.findUnique({ where: { id }, select: { email: true } });
+  if (!existing) throw notFound("Student");
+  if (existing.email.toLowerCase() !== data.email.toLowerCase()) assertEmailVerified(req.body?.emailVerificationToken, data.email);
   await assertAadhaarFree(prisma, data.aadhaarNumber, id);
   const student = await prisma.student.update({ where: { id }, data });
   res.json(student);
@@ -68,8 +72,8 @@ const refereeSchema = z.object({
   fullName: z.string().trim().min(2, "Name is required").max(100),
   grade: z.string().trim().max(60).default(""),
   district: z.string().trim().max(80).default(""),
-  phone: z.string().trim().max(20).default(""),
-  email: z.union([z.literal(""), z.email("Email is not valid")]).default(""),
+  phone: z.union([z.literal(""), z.string().trim().regex(/^[6-9]d{9}$/, "Enter a valid 10-digit mobile number")]).default(""),
+  email: z.email("Enter a valid email address").max(254),
 });
 
 export const refereesRouter = Router();
@@ -90,12 +94,19 @@ refereesRouter.get("/", async (req, res) => {
 });
 
 refereesRouter.post("/", async (req, res) => {
-  const referee = await prisma.referee.create({ data: refereeSchema.parse(req.body) });
+  const data = refereeSchema.parse(req.body);
+  assertEmailVerified(req.body?.emailVerificationToken, data.email);
+  const referee = await prisma.referee.create({ data });
   res.status(201).json(referee);
 });
 
 refereesRouter.put("/:id", async (req, res) => {
-  const referee = await prisma.referee.update({ where: { id: param(req, "id") }, data: refereeSchema.parse(req.body) });
+  const id = param(req, "id");
+  const data = refereeSchema.parse(req.body);
+  const existing = await prisma.referee.findUnique({ where: { id }, select: { email: true } });
+  if (!existing) throw notFound("Referee");
+  if (existing.email.toLowerCase() !== data.email.toLowerCase()) assertEmailVerified(req.body?.emailVerificationToken, data.email);
+  const referee = await prisma.referee.update({ where: { id }, data });
   res.json(referee);
 });
 

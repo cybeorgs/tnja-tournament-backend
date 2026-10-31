@@ -130,6 +130,8 @@ const registrationSchema = z
   .object({
     studentId: z.string().uuid().optional(),
     student: studentSchema.optional(),
+    /** Proof the new student's email was verified (POST /public/email-otp/verify) */
+    emailVerificationToken: z.string().optional(),
     ageGroup: z.string().min(1, "Age group is required"),
     weightKg: z.coerce.number().min(10, "Weight looks too low").max(250, "Weight looks too high"),
     /** Leave empty to work it out from the weight */
@@ -184,7 +186,7 @@ router.post("/:id/registrations", async (req, res) => {
   const certificateNo = await newCertificateNo();
 
   const registration = await prisma.$transaction(async (tx) => {
-    const studentId = input.studentId ?? (await createStudent(tx, input.student!)).id;
+    const studentId = input.studentId ?? (await createStudent(tx, input.student!, input.emailVerificationToken)).id;
     return tx.registration.create({
       data: { tournamentId: tournament.id, studentId, ...category, certificateNo, paymentStatus: tournament.entryFee > 0 ? "PENDING" : "WAIVED" },
       include: { student: true },
