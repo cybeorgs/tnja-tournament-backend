@@ -72,7 +72,7 @@ const refereeSchema = z.object({
   fullName: z.string().trim().min(2, "Name is required").max(100),
   grade: z.string().trim().max(60).default(""),
   district: z.string().trim().max(80).default(""),
-  phone: z.union([z.literal(""), z.string().trim().regex(/^[6-9]d{9}$/, "Enter a valid 10-digit mobile number")]).default(""),
+  phone: z.union([z.literal(""), z.string().trim().regex(/^[6-9]\d{9}$/, "Enter a valid 10-digit mobile number")]).default(""),
   email: z.email("Enter a valid email address").max(254),
 });
 
