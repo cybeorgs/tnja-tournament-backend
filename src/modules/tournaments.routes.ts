@@ -126,6 +126,9 @@ router.post("/:id/status", async (req, res) => {
 
 // ─── Registrations ───────────────────────────────────────────────────────────
 
+/** Which categories a student of gender OTHER competes in (judo categories are boys' or girls'). */
+export const competeAsSchema = z.enum(["MALE", "FEMALE"]).optional();
+
 const registrationSchema = z
   .object({
     studentId: z.string().uuid().optional(),
@@ -138,6 +141,7 @@ const registrationSchema = z
     weightCategory: z.string().optional(),
     /** Skip the birth-year check for this age group */
     overrideAge: z.boolean().default(false),
+    competeAs: competeAsSchema,
   })
   .refine((r) => r.studentId || r.student, { message: "Pick a student or enter new student details", path: ["studentId"] });
 
@@ -147,15 +151,20 @@ async function drawsContaining(tournamentId: string, regId: string) {
   return draws.filter((d) => (d.entrants as unknown as Entrant[]).some((e) => e.id === regId));
 }
 
-export async function resolveCategory(tournament: Awaited<ReturnType<typeof findTournament>>, student: { dob: Date; gender: string }, input: { ageGroup: string; weightKg: number; weightCategory?: string | undefined; overrideAge: boolean }) {
-  if (tournament.gender !== "BOTH" && student.gender !== tournament.gender) {
+export async function resolveCategory(
+  tournament: Awaited<ReturnType<typeof findTournament>>,
+  student: { dob: Date; gender: string },
+  input: { ageGroup: string; weightKg: number; weightCategory?: string | undefined; overrideAge: boolean; competeAs?: Gender | undefined },
+) {
+  const gender: Gender | undefined = student.gender === "OTHER" ? input.competeAs : (student.gender as Gender);
+  if (!gender) throw new HttpError(400, "Choose whether to compete in the boys' or girls' categories.");
+  if (tournament.gender !== "BOTH" && gender !== tournament.gender) {
     throw new HttpError(400, `This tournament is for ${tournament.gender === "MALE" ? "boys/men" : "girls/women"} only.`);
   }
   if (!tournament.ageGroups.includes(input.ageGroup)) throw new HttpError(400, `${input.ageGroup} is not an age group in this tournament.`);
   if (!input.overrideAge && !eligibleAgeGroups(student.dob, tournament.startDate, [input.ageGroup]).length) {
     throw new HttpError(400, `The student's birth year is outside ${input.ageGroup}. Tick "override age check" to enter them anyway.`);
   }
-  const gender = student.gender as Gender;
   const weightCategory = input.weightCategory || weightCategoryFor(input.weightKg, input.ageGroup, gender);
   if (!weightClasses(input.ageGroup, gender).includes(weightCategory)) throw new HttpError(400, `${weightCategory} is not a weight class for ${input.ageGroup}.`);
   return { ageGroup: input.ageGroup, gender, weightKg: input.weightKg, weightCategory };
@@ -200,6 +209,7 @@ const updateRegistrationSchema = z.object({
   weightKg: z.coerce.number().min(10).max(250),
   weightCategory: z.string().optional(),
   overrideAge: z.boolean().default(false),
+  competeAs: competeAsSchema,
 });
 
 router.put("/:id/registrations/:regId", async (req, res) => {
@@ -207,7 +217,8 @@ router.put("/:id/registrations/:regId", async (req, res) => {
   const existing = await prisma.registration.findFirst({ where: { id: param(req, "regId"), tournamentId: tournament.id }, include: { student: true } });
   if (!existing) throw notFound("Registration");
   const input = updateRegistrationSchema.parse(req.body);
-  const category = await resolveCategory(tournament, existing.student, input);
+  // An OTHER student keeps the categories they entered in unless told otherwise.
+  const category = await resolveCategory(tournament, existing.student, { ...input, competeAs: input.competeAs ?? (existing.gender as Gender) });
 
   const categoryChanged = categoryKey(category) !== categoryKey(existing);
   if (categoryChanged && (await drawsContaining(tournament.id, existing.id)).length) {

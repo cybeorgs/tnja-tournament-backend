@@ -35,7 +35,8 @@ export const studentSchema = z
     fullName: name("Full name"),
     fatherName: name("Father's name"),
     motherName: name("Mother's name"),
-    gender: z.enum(["MALE", "FEMALE"], { error: "Choose the gender" }),
+    /** OTHER students pick boys' or girls' categories when they enter a tournament (competeAs). */
+    gender: z.enum(["MALE", "FEMALE", "OTHER"], { error: "Choose the gender" }),
     dob: z.coerce.date({ error: "Date of birth is required" }).refine((d) => d <= threeYearsAgo(), "Student must be at least 3 years old"),
     bloodGroup: z.enum(BLOOD_GROUPS, { error: "Choose the blood group" }),
     aadhaarNumber: z.string().trim().regex(/^\d{12}$/, "Aadhaar number must be 12 digits"),

@@ -68,7 +68,7 @@ studentsRouter.delete("/:id", async (req, res) => {
 
 // ─── Referees ────────────────────────────────────────────────────────────────
 
-const refereeSchema = z.object({
+export const refereeSchema = z.object({
   fullName: z.string().trim().min(2, "Name is required").max(100),
   grade: z.string().trim().max(60).default(""),
   district: z.string().trim().max(80).default(""),

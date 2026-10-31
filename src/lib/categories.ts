@@ -19,7 +19,6 @@ export const AGE_GROUPS: AgeGroupDef[] = [
   { name: "Cadet", minAge: 16, maxAge: 18, weights: { MALE: [50, 55, 60, 66, 73, 81, 90], FEMALE: [40, 44, 48, 52, 57, 63, 70] } },
   { name: "Junior", minAge: 16, maxAge: 21, weights: { MALE: [55, 60, 66, 73, 81, 90, 100], FEMALE: [44, 48, 52, 57, 63, 70, 78] } },
   { name: "Senior", minAge: 16, maxAge: 120, weights: { MALE: [60, 66, 73, 81, 90, 100], FEMALE: [48, 52, 57, 63, 70, 78] } },
-  { name: "Veteran", minAge: 35, maxAge: 120, weights: { MALE: [60, 66, 73, 81, 90, 100], FEMALE: [48, 52, 57, 63, 70, 78] } },
 ];
 
 export const AGE_GROUP_NAMES = AGE_GROUPS.map((g) => g.name);

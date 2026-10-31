@@ -74,7 +74,7 @@ model Student {
   fatherName       String   @default("")
   motherName       String   @default("")
   dob              DateTime
-  /// MALE | FEMALE
+  /// MALE | FEMALE | OTHER (OTHER chooses boys' or girls' categories per tournament)
   gender           String
   club             String   @default("")
   /// Residing / studying district
@@ -115,7 +115,7 @@ model Registration {
   tournamentId      String
   studentId         String
   ageGroup          String
-  /// Same values as Student.gender, copied so a category never changes underneath a draw.
+  /// MALE | FEMALE: the categories competed in, copied so a category never changes underneath a draw.
   gender            String
   weightKg          Float
   weightCategory    String

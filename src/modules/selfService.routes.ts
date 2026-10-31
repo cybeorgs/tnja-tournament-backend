@@ -1,19 +1,21 @@
 // Public self-service: students register themselves (verifying their email by OTP) and get a permanent student ID
 // straight away — no approval, no fee. They then use that ID to enter a tournament and pay
 // its entry fee. An entry only counts once it is paid (or the tournament is free).
+// Referees register themselves as officials of a tournament the same way (no fee).
 import { Router } from "express";
 import { z } from "zod";
 import prisma from "../db.js";
 import { HttpError, notFound } from "../middleware/errors.js";
 import { rateLimit } from "../middleware/rateLimit.js";
-import { eligibleAgeGroups } from "../lib/categories.js";
+import { REFEREE_ROLES, eligibleAgeGroups } from "../lib/categories.js";
 import { newCertificateNo, param } from "../lib/helpers.js";
 import { createStudent, studentSchema } from "../lib/students.js";
 import { TN_LOCATIONS, lookupPincode } from "../lib/locations.js";
-import { checkEmailOtp, createEmailOtp, createEmailVerifiedToken } from "../lib/emailOtp.js";
+import { assertEmailVerified, checkEmailOtp, createEmailOtp, createEmailVerifiedToken } from "../lib/emailOtp.js";
 import { sendEmailOtp } from "../lib/mailer.js";
 import { confirmEntryPayment, createEntryOrder, getRazorpay, verifySchema } from "../lib/payments.js";
-import { resolveCategory } from "./tournaments.routes.js";
+import { competeAsSchema, resolveCategory } from "./tournaments.routes.js";
+import { refereeSchema } from "./people.routes.js";
 
 const router = Router();
 
@@ -111,7 +113,7 @@ router.post("/tournaments/:slug/entry/check", entryLimiter, async (req, res) => 
   const existing = await prisma.registration.findUnique({ where: { tournamentId_studentId: { tournamentId: tournament.id, studentId: student.id } } });
   res.json({
     student: { studentNo: student.studentNo, fullName: student.fullName, gender: student.gender },
-    genderAllowed: tournament.gender === "BOTH" || tournament.gender === student.gender,
+    genderAllowed: tournament.gender === "BOTH" || student.gender === "OTHER" || tournament.gender === student.gender,
     ageGroups: eligibleAgeGroups(student.dob, tournament.startDate, tournament.ageGroups),
     entryFee: tournament.entryFee,
     entry: existing ? entryView(existing) : null,
@@ -121,6 +123,7 @@ router.post("/tournaments/:slug/entry/check", entryLimiter, async (req, res) => 
 const enterSchema = identifySchema.extend({
   ageGroup: z.string().min(1, "Choose an age group"),
   weightKg: z.coerce.number().min(10, "Weight looks too low").max(250, "Weight looks too high"),
+  competeAs: competeAsSchema,
 });
 
 /** Step 2: create (or update) the entry and, if there is a fee, open a payment order. */
@@ -164,6 +167,37 @@ router.post("/tournaments/:slug/entry/:regId/verify", entryLimiter, async (req, 
   if (!registration) throw notFound("Entry");
   const paid = await confirmEntryPayment(registration, tournament.entryFee, verifySchema.parse(req.body));
   res.json({ entry: entryView(paid) });
+});
+
+// ─── Referee registration ────────────────────────────────────────────────────
+
+const officialSchema = refereeSchema.extend({
+  role: z.enum(REFEREE_ROLES).default("REFEREE"),
+  /** From POST /email-otp/verify */
+  emailVerificationToken: z.string({ error: "Please verify your email address." }),
+});
+
+/**
+ * A referee signs up as an official of a tournament. Their verified email identifies them, so a
+ * referee who registered before is reused (and their details refreshed) instead of duplicated.
+ * The organiser sets their mat later.
+ */
+router.post("/tournaments/:slug/officials", registerLimiter, async (req, res) => {
+  const tournament = await openTournament(param(req, "slug"));
+  const { role, emailVerificationToken, ...details } = officialSchema.parse(req.body);
+  assertEmailVerified(emailVerificationToken, details.email);
+
+  const official = await prisma.$transaction(async (tx) => {
+    const known = await tx.referee.findFirst({ where: { email: { equals: details.email, mode: "insensitive" } } });
+    const referee = known ? await tx.referee.update({ where: { id: known.id }, data: details }) : await tx.referee.create({ data: details });
+    const already = await tx.tournamentReferee.findUnique({ where: { tournamentId_refereeId: { tournamentId: tournament.id, refereeId: referee.id } } });
+    if (already) throw new HttpError(409, "You're already registered as an official for this tournament.");
+    return tx.tournamentReferee.create({
+      data: { tournamentId: tournament.id, refereeId: referee.id, role, certificateNo: await newCertificateNo() },
+      include: { referee: true },
+    });
+  });
+  res.status(201).json({ fullName: official.referee.fullName, role: official.role });
 });
 
 export default router;
