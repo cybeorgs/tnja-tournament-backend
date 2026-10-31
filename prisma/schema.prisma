@@ -1,0 +1,198 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Accounts that can log in and run tournaments. There is no approval chain:
+/// any admin has full control over every tournament.
+model Admin {
+  id           String   @id @default(uuid())
+  username     String   @unique
+  passwordHash String
+  name         String   @default("Administrator")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+/// Single-row white-label settings (id is always "default").
+model Settings {
+  id              String   @id @default("default")
+  orgName         String   @default("Tamil Nadu Judo Association")
+  orgShortName    String   @default("TNJA")
+  tagline         String   @default("Affiliated to Judo Federation of India")
+  signatory1Name  String   @default("")
+  signatory1Title String   @default("President")
+  signatory2Name  String   @default("")
+  signatory2Title String   @default("Secretary")
+  logo            Bytes?
+  logoMime        String?
+  updatedAt       DateTime @updatedAt
+}
+
+model Tournament {
+  id               String    @id @default(uuid())
+  slug             String    @unique
+  title            String
+  description      String    @default("")
+  venue            String
+  city             String    @default("")
+  startDate        DateTime
+  endDate          DateTime?
+  /// DISTRICT | STATE | ZONAL | NATIONAL | OPEN
+  level            String    @default("STATE")
+  /// MALE | FEMALE | BOTH
+  gender           String    @default("BOTH")
+  /// Age groups contested, e.g. ["Sub-Junior", "Cadet"]
+  ageGroups        String[]
+  entryFee         Int       @default(0)
+  numberOfMats     Int       @default(1)
+  registrationOpen Boolean   @default(true)
+  /// DRAFT (only admins see it) | PUBLISHED (public page live) | COMPLETED
+  status           String    @default("DRAFT")
+  publishedAt      DateTime?
+  /// When true the public page shows placements and certificates can be downloaded publicly.
+  resultsPublished Boolean   @default(false)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  registrations Registration[]
+  referees      TournamentReferee[]
+  draws         Draw[]
+}
+
+/// Master list of athletes, reusable across tournaments.
+model Student {
+  id               String   @id @default(uuid())
+  /// Permanent student ID issued the moment the student is created, e.g. TNJA-S-000123.
+  /// Students quote it to enter tournaments. It never changes.
+  studentNo        String   @unique
+  fullName         String
+  fatherName       String   @default("")
+  motherName       String   @default("")
+  dob              DateTime
+  /// MALE | FEMALE
+  gender           String
+  club             String   @default("")
+  /// Residing / studying district
+  district         String   @default("")
+  belt             String   @default("")
+  phone            String   @default("")
+  // ── Registration details (see studentSchema in src/lib/students.ts) ──
+  taluk            String   @default("")
+  residingPincode  String   @default("")
+  bloodGroup       String   @default("")
+  /// 12 digits; unique so one person can't hold two student IDs
+  aadhaarNumber    String?  @unique
+  alternatePhone   String   @default("")
+  email            String   @default("")
+  nationality      String   @default("")
+  address          String   @default("")
+  city             String   @default("")
+  state            String   @default("")
+  pincode          String   @default("")
+  annualIncome     Int?
+  /// SCHOOL | COLLEGE | DIPLOMA
+  institutionType  String   @default("")
+  institutionName  String   @default("")
+  /// Standard (school) or year (college / diploma)
+  grade            String   @default("")
+  degreeDepartment String   @default("")
+  coachName        String   @default("")
+  /// SELF (public registration form) | ADMIN
+  source           String   @default("ADMIN")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  registrations Registration[]
+}
+
+model Registration {
+  id                String    @id @default(uuid())
+  tournamentId      String
+  studentId         String
+  ageGroup          String
+  /// Same values as Student.gender, copied so a category never changes underneath a draw.
+  gender            String
+  weightKg          Float
+  weightCategory    String
+  /// FIRST | SECOND | THIRD | PARTICIPATION — set when the category is concluded
+  placement         String?
+  /// Unique, hard-to-guess number printed on the certificate and used for public verification
+  certificateNo     String?   @unique
+  /// PENDING | PAID | WAIVED
+  paymentStatus     String    @default("PENDING")
+  /// RAZORPAY | CASH | UPI | OTHER
+  paymentMode       String?
+  amountPaid        Int       @default(0)
+  razorpayOrderId   String?
+  razorpayPaymentId String?
+  paidAt            DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  tournament Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  student    Student    @relation(fields: [studentId], references: [id], onDelete: Restrict)
+
+  @@unique([tournamentId, studentId])
+  @@index([tournamentId, ageGroup, gender, weightCategory])
+}
+
+/// Master list of referees and technical officials.
+model Referee {
+  id        String   @id @default(uuid())
+  fullName  String
+  /// e.g. "International", "National A", "State"
+  grade     String   @default("")
+  district  String   @default("")
+  phone     String   @default("")
+  email     String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  assignments TournamentReferee[]
+}
+
+model TournamentReferee {
+  id            String   @id @default(uuid())
+  tournamentId  String
+  refereeId     String
+  /// REFEREE | JUDGE | TIMEKEEPER | SCOREKEEPER | TECHNICAL_OFFICIAL
+  role          String   @default("REFEREE")
+  matNumber     Int?
+  certificateNo String   @unique
+  createdAt     DateTime @default(now())
+
+  tournament Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  referee    Referee    @relation(fields: [refereeId], references: [id], onDelete: Restrict)
+
+  @@unique([tournamentId, refereeId])
+}
+
+/// One bracket per category. There is exactly one row per category, so lookups by
+/// (ageGroup, gender, weightCategory) are never ambiguous.
+model Draw {
+  id             String    @id @default(uuid())
+  tournamentId   String
+  ageGroup       String
+  gender         String
+  weightCategory String
+  /// ELIMINATION | ROUND_ROBIN
+  format         String
+  matNumber      Int       @default(1)
+  /// Entrant[] (registration id, name, club) in the order they were drawn
+  entrants       Json
+  /// Match[][] — see src/lib/bracket.ts
+  rounds         Json
+  isConcluded    Boolean   @default(false)
+  concludedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  tournament Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+
+  @@unique([tournamentId, ageGroup, gender, weightCategory])
+}
