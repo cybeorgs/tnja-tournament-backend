@@ -139,7 +139,7 @@ export interface CheckedRow {
 }
 
 /** Validate every row: the form's rules, Tamil Nadu residency, and no Aadhaar number used twice (in the file or already registered). */
-export async function checkRows(rows: { row: number; values: Partial<Record<Field, Cell>> }[]): Promise<CheckedRow[]> {
+export async function checkRows(rows: { row: number; values: Partial<Record<Field, Cell>> }[], onProgress?: (done: number) => void): Promise<CheckedRow[]> {
   const checked: CheckedRow[] = [];
   for (const { row, values } of rows) {
     const input = toInput(values);
@@ -169,6 +169,7 @@ export async function checkRows(rows: { row: number; values: Partial<Record<Fiel
       }
     }
     checked.push({ row, fullName: input.fullName, email: input.email.toLowerCase(), district: input.district, errors, data: errors.length ? null : data });
+    onProgress?.(checked.length);
   }
 
   // One Aadhaar, one student: within the file…

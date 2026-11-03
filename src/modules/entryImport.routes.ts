@@ -10,7 +10,8 @@ import { eligibleAgeGroups, type Gender } from "../lib/categories.js";
 import { findTournament, newCertificateNo, param } from "../lib/helpers.js";
 import { closedReason, newEntryTerms } from "../lib/fees.js";
 import { confirmEntriesLater } from "../lib/notifications.js";
-import { digits, key, readImportSheet, str, templateWorkbook, type Cell, type ImportColumn } from "../lib/importSheet.js";
+import { digits, key, readImportSheet, str, templateWorkbook, undeliverable, type Cell, type ImportColumn } from "../lib/importSheet.js";
+import { getJob, startJob } from "../lib/importJobs.js";
 import { resolveCategory } from "./tournaments.routes.js";
 
 /** Mounted at /tournaments/:id (see app.ts) */
@@ -74,7 +75,7 @@ function parseCompeteAs(v: Cell | undefined): Gender | undefined | null {
 const sameName = (a: string, b: string) => key(a) === key(b);
 
 /** `db`: the Prisma client, or a transaction (tests) */
-export async function checkRows(tournament: Tournament, rows: Row[], fee: number, db: Pick<typeof prisma, "student" | "registration"> = prisma): Promise<CheckedRow[]> {
+export async function checkRows(tournament: Tournament, rows: Row[], fee: number, db: Pick<typeof prisma, "student" | "registration"> = prisma, onProgress?: (done: number) => void): Promise<CheckedRow[]> {
   const ids = rows.map((r) => str(r.values.studentNo).toUpperCase()).filter(Boolean);
   const aadhaars = rows.map((r) => digits(r.values.aadhaarNumber)).filter(Boolean);
   const students = await db.student.findMany({ where: { OR: [{ studentNo: { in: ids } }, { aadhaarNumber: { in: aadhaars } }] } });
@@ -90,6 +91,7 @@ export async function checkRows(tournament: Tournament, rows: Row[], fee: number
     const errors: string[] = [];
     const out: CheckedRow = { row, fullName: str(values.fullName), studentNo: str(values.studentNo), entries: [], errors, plan: null };
     checked.push(out);
+    onProgress?.(checked.length);
 
     const no = str(values.studentNo).toUpperCase();
     const aadhaar = digits(values.aadhaarNumber);
@@ -195,47 +197,68 @@ router.post("/registrations/import", express.raw({ type: () => true, limit: "5mb
   // A sheet without either way of finding the student can't work at all
   const noIdentifier = rows.every((r) => r.values.studentNo === undefined && r.values.aadhaarNumber === undefined);
   const missingColumns = [...missing, ...(noIdentifier ? ["Student ID (or Aadhaar Number)"] : [])];
-  const checked = await checkRows(tournament, rows, terms.fee);
-  const summary = (r: CheckedRow) => ({ row: r.row, fullName: r.fullName, studentNo: r.studentNo, entries: r.entries, errors: r.errors });
-  const valid = checked.filter((r) => r.plan);
   const fee = { perEntry: terms.fee, isLate: terms.isLate };
+  const dryRun = req.query.dryRun === "1";
+  const sendEmails = req.query.sendEmails === "1";
 
-  if (req.query.dryRun === "1") {
-    res.json({
-      rows: checked.map(summary), valid: valid.length, invalid: checked.length - valid.length,
-      entries: valid.reduce((n, r) => n + r.plan!.categories.length, 0), fee, missingColumns, unknownColumns: unknown,
-    });
-    return;
-  }
-
-  let entries = 0;
-  const failed = checked.filter((r) => !r.plan).map(summary);
-  const studentIds: string[] = [];
-  for (const r of valid) {
-    const plan = r.plan!;
-    try {
-      const certificateNos = await Promise.all(plan.categories.map(() => newCertificateNo()));
-      // One student at a time, all their entries together
-      await prisma.$transaction(async (tx) => {
-        for (const [i, category] of plan.categories.entries()) {
-          const paid = plan.payment === "PAID";
-          await tx.registration.create({
-            data: {
-              tournamentId: tournament.id, studentId: plan.studentId, ...category, ...terms, certificateNo: certificateNos[i]!,
-              paymentStatus: plan.payment, ...(paid ? { paymentMode: plan.mode, amountPaid: terms.fee, paidAt: new Date() } : {}),
-            },
-          });
-        }
-      });
-      entries += plan.categories.length;
-      studentIds.push(plan.studentId);
-    } catch (err) {
-      const duplicate = err instanceof Error && "code" in err && (err as { code?: string }).code === "P2002";
-      failed.push({ ...summary(r), errors: [duplicate ? "Already entered (added meanwhile)" : err instanceof HttpError ? err.message : "Couldn't save these entries"] });
+  // In the background: a big file takes longer than the proxy waits. Poll GET .../import/jobs/:jobId.
+  const job = startJob(`entries:${tournament.id}`, req.admin!.adminId, async (job) => {
+    job.total = rows.length;
+    const checked = await checkRows(tournament, rows, terms.fee, prisma, (done) => { job.done = done; });
+    const summary = (r: CheckedRow) => ({ row: r.row, fullName: r.fullName, studentNo: r.studentNo, entries: r.entries, errors: r.errors });
+    const valid = checked.filter((r) => r.plan);
+    if (dryRun) {
+      return {
+        rows: checked.map(summary), valid: valid.length, invalid: checked.length - valid.length,
+        entries: valid.reduce((n, r) => n + r.plan!.categories.length, 0), fee, missingColumns, unknownColumns: unknown,
+      };
     }
-  }
-  failed.sort((a, b) => a.row - b.row);
-  // The usual confirmation email (sent once per entry), in the background
-  if (req.query.sendEmails === "1") for (const id of studentIds) confirmEntriesLater(tournament.id, id);
-  res.json({ students: studentIds.length, entries, failed, emailsQueued: req.query.sendEmails === "1" ? studentIds.length : 0 });
+
+    Object.assign(job, { phase: "SAVING", total: valid.length, done: 0 });
+    let entries = 0;
+    const failed = checked.filter((r) => !r.plan).map(summary);
+    const studentIds: string[] = [];
+    for (const r of valid) {
+      const plan = r.plan!;
+      try {
+        const certificateNos = await Promise.all(plan.categories.map(() => newCertificateNo()));
+        // One student at a time, all their entries together
+        await prisma.$transaction(async (tx) => {
+          for (const [i, category] of plan.categories.entries()) {
+            const paid = plan.payment === "PAID";
+            await tx.registration.create({
+              data: {
+                tournamentId: tournament.id, studentId: plan.studentId, ...category, ...terms, certificateNo: certificateNos[i]!,
+                paymentStatus: plan.payment, ...(paid ? { paymentMode: plan.mode, amountPaid: terms.fee, paidAt: new Date() } : {}),
+              },
+            });
+          }
+        });
+        entries += plan.categories.length;
+        studentIds.push(plan.studentId);
+      } catch (err) {
+        const duplicate = err instanceof Error && "code" in err && (err as { code?: string }).code === "P2002";
+        failed.push({ ...summary(r), errors: [duplicate ? "Already entered (added meanwhile)" : err instanceof HttpError ? err.message : "Couldn't save these entries"] });
+      }
+      job.done++;
+    }
+    failed.sort((a, b) => a.row - b.row);
+
+    // The usual confirmation email (sent once per entry), never to reserved test domains
+    let emailsQueued = 0;
+    if (sendEmails && studentIds.length) {
+      const students = await prisma.student.findMany({ where: { id: { in: studentIds } }, select: { id: true, email: true } });
+      for (const st of students) {
+        if (!st.email || undeliverable(st.email)) continue;
+        confirmEntriesLater(tournament.id, st.id);
+        emailsQueued++;
+      }
+    }
+    return { students: studentIds.length, entries, failed, emailsQueued, emailsSkipped: sendEmails ? studentIds.length - emailsQueued : 0 };
+  });
+  res.status(202).json({ jobId: job.id });
+});
+
+router.get("/registrations/import/jobs/:jobId", (req, res) => {
+  res.json(getJob(param(req, "jobId"), req.admin!.adminId));
 });

@@ -17,6 +17,9 @@ export interface ImportColumn<F extends string> {
   example: string | number;
 }
 
+/** Reserved test domains (RFC 2606 / 6761): never send email there. */
+export const undeliverable = (email: string) => /(.(invalid|test|example|localhost)|@example.(com|net|org))$/i.test(email.trim());
+
 /** Header comparison key: lower case, letters and digits only */
 export const key = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 export const str = (v: Cell | undefined) => (v === null || v === undefined ? "" : v instanceof Date ? v.toISOString().slice(0, 10) : String(v).trim());

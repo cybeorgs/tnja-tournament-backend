@@ -9,6 +9,8 @@ import { assertEmailVerified } from "../lib/emailOtp.js";
 import { ensureAccount, welcomeLink } from "../lib/accounts.js";
 import { DATE, DATE_TIME, maskAadhaar, sendWorkbook, yearAge, type Column } from "../lib/excel.js";
 import { checkRows, readSheet, templateWorkbook } from "../lib/studentImport.js";
+import { getJob, startJob } from "../lib/importJobs.js";
+import { undeliverable } from "../lib/importSheet.js";
 import { sendStudentApproved, sendStudentRegistered, sendStudentRejected } from "../lib/mailer.js";
 
 const listQuery = z.object({
@@ -104,8 +106,10 @@ studentsRouter.get("/import/template", async (_req, res) => {
 
 /**
  * Import students from the template (.xlsx or .csv), sent as the raw request body with the file name in
- * X-Filename. ?dryRun=1 only checks every row. Otherwise the valid rows are created (rows with problems are
- * skipped and listed) and, with ?sendEmails=1, each new account gets its set-password link by email.
+ * X-Filename. Runs in the background (a big file takes longer than the proxy waits): the reply is a job to
+ * poll at GET /students/import/jobs/:jobId. ?dryRun=1 only checks every row. Otherwise the valid rows are
+ * created (rows with problems are skipped and listed) and, with ?sendEmails=1, each new account gets its
+ * set-password link by email.
  */
 studentsRouter.post("/import", express.raw({ type: () => true, limit: "5mb" }), async (req, res) => {
   const file = req.body;
@@ -113,44 +117,54 @@ studentsRouter.post("/import", express.raw({ type: () => true, limit: "5mb" }), 
   const filename = decodeURIComponent(String(req.headers["x-filename"] ?? "students.xlsx"));
   const dryRun = req.query.dryRun === "1";
   const sendEmails = req.query.sendEmails === "1";
-
+  // Read the sheet now, so a wrong file is reported straight away
   const { rows, missing, unknown } = await readSheet(file, filename);
-  const checked = await checkRows(rows);
-  const summary = (r: (typeof checked)[number]) => ({ row: r.row, fullName: r.fullName, email: r.email, district: r.district, errors: r.errors });
 
-  if (dryRun) {
-    res.json({ rows: checked.map(summary), valid: checked.filter((r) => r.data).length, invalid: checked.filter((r) => !r.data).length, missingColumns: missing, unknownColumns: unknown });
-    return;
-  }
-
-  const created: { row: number; fullName: string; studentNo: string | null }[] = [];
-  const failed = checked.filter((r) => !r.data).map(summary);
-  const welcome: { email: string; fullName: string; studentNo: string | null; link: string | null }[] = [];
-  for (const r of checked) {
-    if (!r.data) continue;
-    try {
-      // One row at a time: a problem with one student doesn't stop the rest.
-      const { student, account } = await prisma.$transaction(async (tx) => {
-        const s = await createStudent(tx, r.data!, undefined, { source: "ADMIN", bulkImport: true });
-        return { student: s, account: await ensureAccount(tx, s.email) };
-      });
-      created.push({ row: r.row, fullName: student.fullName, studentNo: student.studentNo });
-      welcome.push({ email: student.email, fullName: student.fullName, studentNo: student.studentNo, link: welcomeLink(account) });
-    } catch (err) {
-      failed.push({ ...summary(r), errors: [err instanceof HttpError ? err.message : "Couldn't save this student"] });
+  const job = startJob("students", req.admin!.adminId, async (job) => {
+    job.total = rows.length;
+    const checked = await checkRows(rows, (done) => { job.done = done; });
+    const summary = (r: (typeof checked)[number]) => ({ row: r.row, fullName: r.fullName, email: r.email, district: r.district, errors: r.errors });
+    if (dryRun) {
+      return { rows: checked.map(summary), valid: checked.filter((r) => r.data).length, invalid: checked.filter((r) => !r.data).length, missingColumns: missing, unknownColumns: unknown };
     }
-  }
-  failed.sort((a, b) => a.row - b.row);
 
-  // Emails go out after the response, one by one, so a large import doesn't time out.
-  if (sendEmails && welcome.length) {
-    void (async () => {
-      for (const w of welcome) {
-        await sendStudentRegistered(w.email, { fullName: w.fullName, studentNo: w.studentNo, setPasswordUrl: w.link }).catch((err) => console.error("Import welcome email failed:", err));
+    const toSave = checked.filter((r) => r.data);
+    Object.assign(job, { phase: "SAVING", total: toSave.length, done: 0 });
+    const created: { row: number; fullName: string; studentNo: string | null }[] = [];
+    const failed = checked.filter((r) => !r.data).map(summary);
+    const welcome: { email: string; fullName: string; studentNo: string | null; link: string | null }[] = [];
+    for (const r of toSave) {
+      try {
+        // One row at a time: a problem with one student doesn't stop the rest.
+        const { student, account } = await prisma.$transaction(async (tx) => {
+          const s = await createStudent(tx, r.data!, undefined, { source: "ADMIN", bulkImport: true });
+          return { student: s, account: await ensureAccount(tx, s.email) };
+        });
+        created.push({ row: r.row, fullName: student.fullName, studentNo: student.studentNo });
+        welcome.push({ email: student.email, fullName: student.fullName, studentNo: student.studentNo, link: welcomeLink(account) });
+      } catch (err) {
+        failed.push({ ...summary(r), errors: [err instanceof HttpError ? err.message : "Couldn't save this student"] });
       }
-    })();
-  }
-  res.json({ created: created.length, students: created, failed, emailsQueued: sendEmails ? welcome.length : 0 });
+      job.done++;
+    }
+    failed.sort((a, b) => a.row - b.row);
+
+    // Emails one by one after saving; never to reserved test domains (e.g. @example.invalid)
+    const mail = sendEmails ? welcome.filter((w) => !undeliverable(w.email)) : [];
+    if (mail.length) {
+      void (async () => {
+        for (const w of mail) {
+          await sendStudentRegistered(w.email, { fullName: w.fullName, studentNo: w.studentNo, setPasswordUrl: w.link }).catch((err) => console.error("Import welcome email failed:", err));
+        }
+      })();
+    }
+    return { created: created.length, students: created, failed, emailsQueued: mail.length, emailsSkipped: sendEmails ? welcome.length - mail.length : 0 };
+  });
+  res.status(202).json({ jobId: job.id });
+});
+
+studentsRouter.get("/import/jobs/:jobId", (req, res) => {
+  res.json(getJob(param(req, "jobId"), req.admin!.adminId));
 });
 
 /** Students an admin adds are approved straight away and get a login by email. */
