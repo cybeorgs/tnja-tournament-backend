@@ -7,11 +7,10 @@ import {
 } from "../lib/categories.js";
 import type { Entrant } from "../lib/bracket.js";
 import { categoryKey, findTournament, newCertificateNo, param, slugify } from "../lib/helpers.js";
-import { confirmOrderPayment, createEntryOrder, verifySchema } from "../lib/payments.js";
 import { ensureAccount } from "../lib/accounts.js";
-import { confirmEntriesLater, resendPaymentReceipt, sendEntryConfirmations, sendRemindersNow } from "../lib/notifications.js";
+import { emailRegistrationLater } from "../lib/registrationEmails.js";
 import { confirmResidency, createStudent, studentSchema } from "../lib/students.js";
-import { closedReason, newEntryTerms, repriceUnpaid } from "../lib/fees.js";
+import { closedReason, newEntryTerms } from "../lib/fees.js";
 import { DATE, DATE_TIME, maskAadhaar, sendWorkbook, yearAge, type Column } from "../lib/excel.js";
 
 const router = Router();
@@ -28,17 +27,11 @@ const tournamentSchema = z
     startDate: z.coerce.date({ error: "Start date and time are required" }),
     endDate: z.coerce.date().nullable().optional(),
     registrationOpensAt: z.coerce.date({ error: "Registration opening date and time are required" }),
-    /** End of regular registration; late registration (at the late entry fee) runs from here until the start */
+    /** End of regular registration; late registration runs from here until the start */
     registrationClosesAt: z.coerce.date({ error: "Regular registration closing date and time are required" }),
-    /** When to email the deadline reminder to players with unpaid entries; null = don't send one */
-    reminderAt: z.coerce.date().nullable().default(null),
     level: z.enum(TOURNAMENT_LEVELS),
     gender: z.enum(["MALE", "FEMALE", "BOTH"]),
     ageGroups: z.array(z.enum(AGE_GROUP_NAMES as [string, ...string[]])).min(1, "Pick at least one age group"),
-    /** Regular entry fee */
-    entryFee: z.coerce.number().int().min(0).max(100000).default(0),
-    /** Late entry fee, set by the admin; not lower than the regular fee */
-    lateEntryFee: z.coerce.number({ error: "Enter the late entry fee" }).int().min(0).max(100000),
     // Set on the tournament page (Officials tab), not the create/edit form. Left out, a new
     // tournament gets 1 mat and an edit keeps the current count.
     numberOfMats: z.coerce.number().int().min(1).max(20).optional(),
@@ -46,12 +39,10 @@ const tournamentSchema = z
   // The end date is a date only, so compare whole days (the start has a time of day).
   .refine((t) => !t.endDate || t.endDate.getTime() > t.startDate.getTime() - 24 * 60 * 60 * 1000, { message: "End date cannot be before the start date", path: ["endDate"] })
   .refine((t) => t.registrationOpensAt < t.registrationClosesAt, { message: "Regular registration must close after it opens", path: ["registrationClosesAt"] })
-  .refine((t) => t.registrationClosesAt <= t.startDate, { message: "Regular registration must close before the tournament starts", path: ["registrationClosesAt"] })
-  .refine((t) => t.lateEntryFee >= t.entryFee, { message: "The late entry fee can't be lower than the regular entry fee", path: ["lateEntryFee"] })
-  .refine((t) => !t.reminderAt || (t.reminderAt > t.registrationOpensAt && t.reminderAt < t.registrationClosesAt), {
-    message: "The reminder must be sent after registration opens and before regular registration closes",
-    path: ["reminderAt"],
-  });
+  .refine((t) => t.registrationClosesAt <= t.startDate, { message: "Regular registration must close before the tournament starts", path: ["registrationClosesAt"] });
+
+/** Registration is free: fees are always 0 and there is no payment reminder. */
+const free = { entryFee: 0, lateEntryFee: 0, reminderAt: null };
 
 router.get("/", async (_req, res) => {
   const tournaments = await prisma.tournament.findMany({
@@ -67,46 +58,32 @@ router.post("/", async (req, res) => {
   const data = tournamentSchema.parse(req.body);
   // A new tournament is live on the public site straight away; there is no draft stage.
   const tournament = await prisma.tournament.create({
-    data: { ...data, endDate: data.endDate ?? null, slug: slugify(data.title), status: "PUBLISHED", publishedAt: new Date() },
+    data: { ...data, ...free, endDate: data.endDate ?? null, slug: slugify(data.title), status: "PUBLISHED", publishedAt: new Date() },
   });
   res.status(201).json(tournament);
 });
 
 router.get("/:id", async (req, res) => {
   const tournament = await findTournament(param(req, "id"));
-  await repriceUnpaid(tournament); // so amounts due are current
   const [registrations, referees, draws] = await Promise.all([
     prisma.registration.findMany({
       where: { tournamentId: tournament.id },
-      select: { studentId: true, ageGroup: true, gender: true, weightCategory: true, paymentStatus: true, amountPaid: true, fee: true, isLate: true },
+      select: { studentId: true, ageGroup: true, gender: true, weightCategory: true, isLate: true, weighInStatus: true },
     }),
     prisma.tournamentReferee.count({ where: { tournamentId: tournament.id } }),
     prisma.draw.findMany({ where: { tournamentId: tournament.id }, select: { isConcluded: true } }),
   ]);
   const categories = new Set(registrations.map(categoryKey));
-  const sum = (rows: typeof registrations, pick: (r: (typeof registrations)[number]) => number) => rows.reduce((total, r) => total + pick(r), 0);
-  const paidEntries = registrations.filter((r) => r.paymentStatus === "PAID");
-  const pendingEntries = registrations.filter((r) => r.paymentStatus === "PENDING");
   const players = new Set(registrations.map((r) => r.studentId));
-  const playersOwing = new Set(pendingEntries.map((r) => r.studentId));
   res.json({
     ...tournament,
     stats: {
       registrations: registrations.length,
-      paid: paidEntries.length,
-      collected: sum(paidEntries, (r) => r.amountPaid),
       // Players (a player may enter several age groups)
       players: players.size,
-      /** Players with every entry settled (paid or free) */
-      paidPlayers: [...players].filter((id) => !playersOwing.has(id)).length,
-      playersOwing: playersOwing.size,
-      // Entries
-      pendingPayments: pendingEntries.length,
-      pendingAmount: sum(pendingEntries, (r) => r.fee),
       regularEntries: registrations.filter((r) => !r.isLate).length,
       lateEntries: registrations.filter((r) => r.isLate).length,
-      regularRevenue: sum(paidEntries.filter((r) => !r.isLate), (r) => r.amountPaid),
-      lateRevenue: sum(paidEntries.filter((r) => r.isLate), (r) => r.amountPaid),
+      weighedIn: registrations.filter((r) => r.weighInStatus === "CLEARED").length,
       referees,
       categories: categories.size,
       draws: draws.length,
@@ -127,9 +104,7 @@ router.put("/:id", async (req, res) => {
     const clash = await prisma.registration.count({ where: { tournamentId: existing.id, ageGroup: { in: removedGroups } } });
     if (clash) throw new HttpError(409, `Students are registered in ${removedGroups.join(", ")}. Remove them before dropping that age group.`);
   }
-  const tournament = await prisma.tournament.update({ where: { id: existing.id }, data: { ...data, endDate: data.endDate ?? null } });
-  // Unpaid entries follow the fee policy (current period's fee); paid entries keep what they paid.
-  await repriceUnpaid(tournament);
+  const tournament = await prisma.tournament.update({ where: { id: existing.id }, data: { ...data, ...free, endDate: data.endDate ?? null } });
   res.json(tournament);
 });
 
@@ -191,8 +166,6 @@ const registrationSchema = z
   .object({
     studentId: z.string().uuid().optional(),
     student: studentSchema.optional(),
-    /** Proof the new student's email was verified (POST /public/email-otp/verify) */
-    emailVerificationToken: z.string().optional(),
     ageGroup: z.string().min(1).optional(),
     /** Enter several age groups at once (e.g. a cadet in Cadet, Junior and Senior): one entry each */
     ageGroups: z.array(z.string().min(1)).max(8).optional(),
@@ -234,7 +207,6 @@ export async function resolveCategory(
 /** Every entry in the tournament with the student's details, as an Excel sheet. Aadhaar numbers are masked. */
 router.get("/:id/registrations/export", async (req, res) => {
   const tournament = await findTournament(param(req, "id"));
-  await repriceUnpaid(tournament);
   const rows = await prisma.registration.findMany({
     where: { tournamentId: tournament.id },
     include: { student: true },
@@ -267,12 +239,6 @@ router.get("/:id/registrations/export", async (req, res) => {
     { header: "Aadhaar", width: 18, value: (r) => maskAadhaar(r.student.aadhaarNumber) },
     { header: "Institution", width: 28, value: (r) => r.student.institutionName },
     { header: "Registration", value: (r) => (r.isLate ? "Late" : "Regular") },
-    { header: "Fee (₹)", value: (r) => r.fee, format: "#,##0" },
-    { header: "Payment", value: (r) => label(r.paymentStatus, { PENDING: "Pending", PAID: "Paid", WAIVED: "Waived" }) },
-    { header: "Payment mode", value: (r) => r.paymentMode },
-    { header: "Amount paid (₹)", value: (r) => r.amountPaid, format: "#,##0" },
-    { header: "Paid at", value: (r) => r.paidAt, format: DATE_TIME },
-    { header: "Payment ID", width: 22, value: (r) => r.razorpayPaymentId },
     { header: "Placement", value: (r) => label(r.placement, { FIRST: "1st", SECOND: "2nd", THIRD: "3rd", PARTICIPATION: "Participation" }) },
     { header: "Certificate no.", width: 18, value: (r) => r.certificateNo },
     { header: "Registered on", value: (r) => r.createdAt, format: DATE_TIME },
@@ -282,7 +248,7 @@ router.get("/:id/registrations/export", async (req, res) => {
 
 router.get("/:id/registrations", async (req, res) => {
   const tournamentId = param(req, "id");
-  await repriceUnpaid(await findTournament(tournamentId)); // amounts due are current
+  await findTournament(tournamentId);
   const registrations = await prisma.registration.findMany({
     where: { tournamentId },
     include: { student: true },
@@ -315,12 +281,14 @@ router.post("/:id/registrations", async (req, res) => {
   const certificateNos = await Promise.all(categories.map(() => newCertificateNo()));
 
   // All or nothing: the student (if new) and every entry are created together.
+  let createdStudent: Awaited<ReturnType<typeof createStudent>> | null = null;
   const registrations = await prisma.$transaction(async (tx) => {
     let studentId = input.studentId;
     if (!studentId) {
-      const created = await createStudent(tx, newStudent!, input.emailVerificationToken);
+      const created = await createStudent(tx, newStudent!);
       await ensureAccount(tx, created.email);
       studentId = created.id;
+      createdStudent = created;
     }
     const saved = [];
     for (const [i, category] of categories.entries()) {
@@ -331,8 +299,8 @@ router.post("/:id/registrations", async (req, res) => {
     }
     return saved;
   });
-  // One email: the registration confirmation, which also carries the username and set-password link of a new account.
-  confirmEntriesLater(tournament.id, registrations[0]!.studentId);
+  // A student created here gets the registration email (username, password, PDF); entries send no email.
+  if (createdStudent) emailRegistrationLater(createdStudent);
   res.status(201).json(input.ageGroups ? registrations : registrations[0]);
 });
 
@@ -418,78 +386,6 @@ router.delete("/:id/registrations/:regId", async (req, res) => {
   }
   await prisma.registration.delete({ where: { id: regId } });
   res.json({ message: "Registration removed." });
-});
-
-// ─── Payments ────────────────────────────────────────────────────────────────
-
-async function findRegistration(tournamentId: string, regId: string) {
-  const registration = await prisma.registration.findFirst({ where: { id: regId, tournamentId }, include: { student: true, tournament: true } });
-  if (!registration) throw notFound("Registration");
-  return registration;
-}
-
-router.post("/:id/registrations/:regId/payment/order", async (req, res) => {
-  const registration = await findRegistration(param(req, "id"), param(req, "regId"));
-  if (registration.fee <= 0) throw new HttpError(400, "This entry has no fee to pay.");
-  if (registration.paymentStatus === "PAID") throw new HttpError(409, "This entry is already paid.");
-  const order = await createEntryOrder([registration], registration.tournament);
-  if (!order) throw new HttpError(409, "This entry has already been paid (an earlier online payment went through). Refresh the list.");
-  res.json(order);
-});
-
-router.post("/:id/registrations/:regId/payment/verify", async (req, res) => {
-  const registration = await findRegistration(param(req, "id"), param(req, "regId"));
-  const paid = await confirmOrderPayment(registration.tournamentId, verifySchema.parse(req.body));
-  res.json(paid.find((r) => r.id === registration.id) ?? paid[0]);
-});
-
-const manualPaymentSchema = z.object({
-  status: z.enum(["PENDING", "PAID", "WAIVED"]),
-  mode: z.enum(["CASH", "UPI", "OTHER"]).optional(),
-});
-
-router.patch("/:id/registrations/:regId/payment", async (req, res) => {
-  const registration = await findRegistration(param(req, "id"), param(req, "regId"));
-  const { status, mode } = manualPaymentSchema.parse(req.body);
-  if (registration.paymentMode === "RAZORPAY" && registration.paymentStatus === "PAID" && status !== "PAID") {
-    throw new HttpError(409, "This entry was paid online through Razorpay. Refund it from the Razorpay dashboard first.");
-  }
-  const updated = await prisma.registration.update({
-    where: { id: registration.id },
-    data: status === "PAID"
-      ? { paymentStatus: "PAID", paymentMode: mode ?? "CASH", amountPaid: registration.fee, paidAt: new Date() }
-      : { paymentStatus: status, paymentMode: null, amountPaid: 0, paidAt: null },
-    include: { student: true },
-  });
-  res.json(updated);
-});
-
-// ─── Emails ──────────────────────────────────────────────────────────────────
-// The three tournament emails: delivery log, and sending one on purpose (e.g. after fixing an email
-// address). Automatic sends never repeat; a send from here is a deliberate one.
-
-router.get("/:id/emails", async (req, res) => {
-  const tournamentId = param(req, "id");
-  await findTournament(tournamentId);
-  const logs = await prisma.emailLog.findMany({ where: { tournamentId }, orderBy: { createdAt: "desc" }, take: 300 });
-  const students = await prisma.student.findMany({ where: { id: { in: [...new Set(logs.map((l) => l.studentId).filter((id): id is string => !!id))] } }, select: { id: true, fullName: true } });
-  const names = new Map(students.map((s) => [s.id, s.fullName]));
-  res.json(logs.map((l) => ({ ...l, studentName: l.studentId ? names.get(l.studentId) ?? null : null })));
-});
-
-const sendEmailSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("CONFIRMATION"), studentId: z.string().uuid() }),
-  z.object({ kind: z.literal("REMINDER"), studentId: z.string().uuid().optional() }),
-  z.object({ kind: z.literal("PAYMENT"), studentId: z.string().uuid() }),
-]);
-
-/** Send one of the three emails now. A reminder without a player goes to everyone unpaid who hasn't had one. */
-router.post("/:id/emails", async (req, res) => {
-  const tournament = await findTournament(param(req, "id"));
-  const input = sendEmailSchema.parse(req.body);
-  if (input.kind === "REMINDER") return res.json({ sent: await sendRemindersNow(tournament.id, input.studentId) });
-  const delivery = input.kind === "CONFIRMATION" ? await sendEntryConfirmations(tournament.id, input.studentId, "MANUAL") : await resendPaymentReceipt(tournament.id, input.studentId);
-  res.json({ sent: delivery ? 1 : 0, status: delivery?.status ?? null, error: delivery?.error ?? "" });
 });
 
 // ─── Referees / officials ────────────────────────────────────────────────────

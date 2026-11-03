@@ -5,13 +5,14 @@ import prisma from "../db.js";
 import { HttpError, notFound } from "../middleware/errors.js";
 import { param } from "../lib/helpers.js";
 import { DOCUMENT_KINDS, approveStudent, assertAadhaarFree, confirmResidency, createStudent, studentSchema } from "../lib/students.js";
-import { assertEmailVerified } from "../lib/emailOtp.js";
-import { ensureAccount, welcomeLink } from "../lib/accounts.js";
-import { DATE, DATE_TIME, maskAadhaar, sendWorkbook, yearAge, type Column } from "../lib/excel.js";
+import { ensureAccount } from "../lib/accounts.js";
+import { DATE, DATE_TIME, maskAadhaar, sendSheets, sheet, yearAge, type Column } from "../lib/excel.js";
+import { AGE_GROUPS, AGE_GROUP_NAMES, eligibleAgeGroups } from "../lib/categories.js";
+import { categoryLabel } from "../lib/certificate.js";
 import { checkRows, readSheet, templateWorkbook } from "../lib/studentImport.js";
 import { getJob, startJob } from "../lib/importJobs.js";
 import { undeliverable } from "../lib/importSheet.js";
-import { sendStudentApproved, sendStudentRegistered, sendStudentRejected } from "../lib/mailer.js";
+import { emailApproval, emailRegistration, emailRegistrationLater } from "../lib/registrationEmails.js";
 
 const listQuery = z.object({
   q: z.string().trim().optional(),
@@ -49,18 +50,52 @@ studentsRouter.get("/", async (req, res) => {
   res.json({ items, total, page, pageSize, pending });
 });
 
-/** Every student matching the list's search and status filter, as an Excel sheet. Aadhaar numbers are masked. */
+const LABEL = {
+  status: { APPROVED: "Approved", PENDING: "Waiting for approval", REJECTED: "Rejected" } as Record<string, string>,
+  gender: { MALE: "Male", FEMALE: "Female", OTHER: "Other" } as Record<string, string>,
+  weighIn: { PENDING: "Not weighed", CLEARED: "Cleared", DISQUALIFIED: "Disqualified" } as Record<string, string>,
+  placement: { FIRST: "1st", SECOND: "2nd", THIRD: "3rd", PARTICIPATION: "Participation" } as Record<string, string>,
+  document: { BPL_PROOF: "BPL proof", NATIVITY_PROOF: "Nativity proof" } as Record<string, string>,
+};
+const label = (map: Record<string, string>, v: string | null | undefined) => (v ? map[v] ?? v : "");
+
+/**
+ * Every student matching the list's search and status filter, with all their registration details and
+ * their categories, as Excel: a "Students" sheet (one row per student) and a "Categories" sheet (one row
+ * per tournament entry). Aadhaar numbers are masked; uploaded documents are listed, not attached.
+ */
 studentsRouter.get("/export", async (req, res) => {
   const { where, status } = studentWhere(req.query);
-  const students = await prisma.student.findMany({ where, orderBy: { fullName: "asc" }, include: { _count: { select: { registrations: true } } } });
+  const students = await prisma.student.findMany({
+    where,
+    orderBy: { fullName: "asc" },
+    include: {
+      documents: { select: { kind: true, label: true } },
+      registrations: {
+        include: { tournament: { select: { title: true, startDate: true } } },
+        orderBy: [{ tournament: { startDate: "desc" } }, { ageGroup: "asc" }],
+      },
+    },
+  });
   type S = (typeof students)[number];
-  const columns: Column<S>[] = [
+  type R = S["registrations"][number] & { student: S };
+  const now = new Date();
+  /** The age group whose own band holds this year's age (e.g. 16 → Cadet) */
+  const ownGroup = (s: S) => AGE_GROUPS.find((g) => yearAge(s.dob, now) >= g.minAge && yearAge(s.dob, now) <= g.maxAge)?.name ?? "";
+  const categoriesOf = (s: S) =>
+    [...new Map(s.registrations.map((r) => [r.tournamentId, r.tournament.title])).entries()]
+      .map(([id, title]) => `${title}: ${s.registrations.filter((r) => r.tournamentId === id).map((r) => categoryLabel(r.ageGroup, r.gender, r.weightCategory)).join(", ")}`)
+      .join(" | ");
+
+  const studentColumns: Column<S>[] = [
     { header: "Student ID", width: 16, value: (s) => s.studentNo },
-    { header: "Status", value: (s) => s.status },
+    { header: "Status", width: 18, value: (s) => label(LABEL.status, s.status) },
     { header: "Full name", width: 26, value: (s) => s.fullName },
-    { header: "Gender", value: (s) => s.gender },
+    { header: "Gender", value: (s) => label(LABEL.gender, s.gender) },
     { header: "Date of birth", value: (s) => s.dob, format: DATE },
-    { header: "Age (this year)", value: (s) => yearAge(s.dob) },
+    { header: "Age (this year)", value: (s) => yearAge(s.dob, now) },
+    { header: "Age group", width: 26, value: ownGroup },
+    { header: "Events they can play", width: 26, value: (s) => eligibleAgeGroups(s.dob, now, AGE_GROUP_NAMES).join(", ") },
     { header: "Father's name", width: 22, value: (s) => s.fatherName },
     { header: "Mother's name", width: 22, value: (s) => s.motherName },
     { header: "Phone", width: 14, value: (s) => s.phone },
@@ -68,30 +103,66 @@ studentsRouter.get("/export", async (req, res) => {
     { header: "Email", width: 28, value: (s) => s.email },
     { header: "Blood group", value: (s) => s.bloodGroup },
     { header: "Aadhaar", width: 18, value: (s) => maskAadhaar(s.aadhaarNumber) },
-    { header: "Club", width: 22, value: (s) => s.club },
-    { header: "Coach", width: 20, value: (s) => s.coachName },
-    { header: "Belt", value: (s) => s.belt },
+    { header: "Nationality", value: (s) => s.nationality },
+    { header: "Residing pincode", value: (s) => s.residingPincode },
     { header: "District", width: 16, value: (s) => s.district },
     { header: "Taluk", width: 16, value: (s) => s.taluk },
+    { header: "Outside Tamil Nadu", value: (s) => s.outsideTamilNadu },
     { header: "Address", width: 36, value: (s) => s.address },
     { header: "City", width: 16, value: (s) => s.city },
     { header: "State", width: 16, value: (s) => s.state },
     { header: "Pincode", value: (s) => s.pincode },
-    { header: "Residing pincode", value: (s) => s.residingPincode },
-    { header: "Nationality", value: (s) => s.nationality },
-    { header: "Outside Tamil Nadu", value: (s) => s.outsideTamilNadu },
-    { header: "BPL", value: (s) => s.isBPL },
     { header: "Annual income", value: (s) => s.annualIncome, format: "#,##0" },
+    { header: "BPL", value: (s) => s.isBPL },
     { header: "Institution type", value: (s) => s.institutionType },
     { header: "Institution", width: 28, value: (s) => s.institutionName },
     { header: "Standard / year", value: (s) => s.grade },
     { header: "Department", width: 18, value: (s) => s.degreeDepartment },
+    { header: "Club", width: 22, value: (s) => s.club },
+    { header: "Coach", width: 20, value: (s) => s.coachName },
+    { header: "Belt", value: (s) => s.belt },
+    { header: "Documents uploaded", width: 22, value: (s) => s.documents.map((d) => d.label || label(LABEL.document, d.kind)).join(", ") },
     { header: "Registered by", value: (s) => (s.source === "SELF" ? "Self" : "Admin") },
-    { header: "Tournaments entered", value: (s) => s._count.registrations },
     { header: "Registered on", value: (s) => s.createdAt, format: DATE_TIME },
+    { header: "Reviewed on", value: (s) => s.reviewedAt, format: DATE_TIME },
+    { header: "Review note", width: 24, value: (s) => s.reviewNote },
+    { header: "Tournaments entered", value: (s) => new Set(s.registrations.map((r) => r.tournamentId)).size },
+    { header: "Categories entered", value: (s) => s.registrations.length },
+    { header: "Categories", width: 60, value: categoriesOf },
   ];
-  const stamp = new Date().toISOString().slice(0, 10);
-  await sendWorkbook(res, `students${status ? `_${status.toLowerCase()}` : ""}_${stamp}.xlsx`, "Students", columns, students);
+
+  const entries: R[] = students.flatMap((s) => s.registrations.map((r) => ({ ...r, student: s })));
+  const entryColumns: Column<R>[] = [
+    { header: "Student ID", width: 16, value: (r) => r.student.studentNo },
+    { header: "Full name", width: 26, value: (r) => r.student.fullName },
+    { header: "Gender", value: (r) => label(LABEL.gender, r.student.gender) },
+    { header: "Date of birth", value: (r) => r.student.dob, format: DATE },
+    { header: "Tournament", width: 30, value: (r) => r.tournament.title },
+    { header: "Tournament starts", value: (r) => r.tournament.startDate, format: DATE },
+    { header: "Age at tournament", value: (r) => yearAge(r.student.dob, r.tournament.startDate) },
+    { header: "Age group", width: 26, value: (r) => r.ageGroup },
+    { header: "Section", value: (r) => (r.gender === "FEMALE" ? "Girls" : "Boys") },
+    { header: "Weight class", value: (r) => r.weightCategory },
+    { header: "Category", width: 34, value: (r) => categoryLabel(r.ageGroup, r.gender, r.weightCategory) },
+    { header: "Weight entered (kg)", value: (r) => r.weightKg },
+    { header: "Registration", value: (r) => (r.isLate ? "Late" : "Regular") },
+    { header: "Weigh-in", value: (r) => label(LABEL.weighIn, r.weighInStatus) },
+    { header: "Scale weight (kg)", value: (r) => r.weighInKg },
+    { header: "Weighed at", value: (r) => r.weighedAt, format: DATE_TIME },
+    { header: "Placement", value: (r) => label(LABEL.placement, r.placement) },
+    { header: "Certificate no.", width: 18, value: (r) => r.certificateNo },
+    { header: "Club", width: 22, value: (r) => r.student.club },
+    { header: "District", width: 16, value: (r) => r.student.district },
+    { header: "Phone", width: 14, value: (r) => r.student.phone },
+    { header: "Email", width: 28, value: (r) => r.student.email },
+    { header: "Entered on", value: (r) => r.createdAt, format: DATE_TIME },
+  ];
+
+  const stamp = now.toISOString().slice(0, 10);
+  await sendSheets(res, `students${status ? `_${status.toLowerCase()}` : ""}_${stamp}.xlsx`, [
+    sheet({ name: "Students", columns: studentColumns, rows: students }),
+    sheet({ name: "Categories", columns: entryColumns, rows: entries }),
+  ]);
 });
 
 // ─── Bulk import ─────────────────────────────────────────────────────────────
@@ -132,16 +203,17 @@ studentsRouter.post("/import", express.raw({ type: () => true, limit: "5mb" }), 
     Object.assign(job, { phase: "SAVING", total: toSave.length, done: 0 });
     const created: { row: number; fullName: string; studentNo: string | null }[] = [];
     const failed = checked.filter((r) => !r.data).map(summary);
-    const welcome: { email: string; fullName: string; studentNo: string | null; link: string | null }[] = [];
+    const welcome: Awaited<ReturnType<typeof createStudent>>[] = [];
     for (const r of toSave) {
       try {
         // One row at a time: a problem with one student doesn't stop the rest.
-        const { student, account } = await prisma.$transaction(async (tx) => {
-          const s = await createStudent(tx, r.data!, undefined, { source: "ADMIN", bulkImport: true });
-          return { student: s, account: await ensureAccount(tx, s.email) };
+        const student = await prisma.$transaction(async (tx) => {
+          const s = await createStudent(tx, r.data!, { source: "ADMIN", bulkImport: true });
+          await ensureAccount(tx, s.email);
+          return s;
         });
         created.push({ row: r.row, fullName: student.fullName, studentNo: student.studentNo });
-        welcome.push({ email: student.email, fullName: student.fullName, studentNo: student.studentNo, link: welcomeLink(account) });
+        welcome.push(student);
       } catch (err) {
         failed.push({ ...summary(r), errors: [err instanceof HttpError ? err.message : "Couldn't save this student"] });
       }
@@ -154,7 +226,7 @@ studentsRouter.post("/import", express.raw({ type: () => true, limit: "5mb" }), 
     if (mail.length) {
       void (async () => {
         for (const w of mail) {
-          await sendStudentRegistered(w.email, { fullName: w.fullName, studentNo: w.studentNo, setPasswordUrl: w.link }).catch((err) => console.error("Import welcome email failed:", err));
+          await emailRegistration(w).catch((err: unknown) => console.error("Import registration email failed:", err));
         }
       })();
     }
@@ -167,14 +239,15 @@ studentsRouter.get("/import/jobs/:jobId", (req, res) => {
   res.json(getJob(param(req, "jobId"), req.admin!.adminId));
 });
 
-/** Students an admin adds are approved straight away and get a login by email. */
+/** Students an admin adds are approved straight away; the registration email carries their login and PDF. */
 studentsRouter.post("/", async (req, res) => {
   const data = await confirmResidency(studentSchema.parse(req.body));
-  const { student, account } = await prisma.$transaction(async (tx) => {
-    const created = await createStudent(tx, data, req.body?.emailVerificationToken);
-    return { student: created, account: await ensureAccount(tx, created.email) };
+  const student = await prisma.$transaction(async (tx) => {
+    const created = await createStudent(tx, data);
+    await ensureAccount(tx, created.email);
+    return created;
   });
-  await sendStudentRegistered(student.email, { fullName: student.fullName, studentNo: student.studentNo, setPasswordUrl: welcomeLink(account) });
+  emailRegistrationLater(student);
   res.status(201).json(student);
 });
 
@@ -206,21 +279,19 @@ studentsRouter.put("/:id", async (req, res) => {
   const existing = await prisma.student.findUnique({ where: { id }, select: { email: true } });
   if (!existing) throw notFound("Student");
   const emailChanged = existing.email.toLowerCase() !== data.email;
-  if (emailChanged) assertEmailVerified(req.body?.emailVerificationToken, data.email);
   await assertAadhaarFree(prisma, data.aadhaarNumber, id);
-  const { student, account } = await prisma.$transaction(async (tx) => ({
-    student: await tx.student.update({ where: { id }, data }),
-    account: emailChanged ? await ensureAccount(tx, data.email) : null,
-  }));
-  // A new email that didn't have a login yet gets the welcome email with its set-password link.
-  if (account?.created) await sendStudentRegistered(student.email, { fullName: student.fullName, studentNo: student.studentNo, setPasswordUrl: welcomeLink(account) });
+  const student = await prisma.$transaction(async (tx) => {
+    const updated = await tx.student.update({ where: { id }, data });
+    if (emailChanged) await ensureAccount(tx, data.email);
+    return updated;
+  });
   res.json(student);
 });
 
-/** Approve an application from outside Tamil Nadu: issues the permanent ID and emails it. */
+/** Approve an application from outside Tamil Nadu: issues the permanent ID and emails it with the registration PDF. */
 studentsRouter.post("/:id/approve", async (req, res) => {
   const student = await prisma.$transaction((tx) => approveStudent(tx, param(req, "id")));
-  await sendStudentApproved(student.email, { fullName: student.fullName, studentNo: student.studentNo! });
+  emailApproval(student).catch((err) => console.error("[registration email] approval failed:", err));
   res.json(student);
 });
 
@@ -230,7 +301,6 @@ studentsRouter.post("/:id/reject", async (req, res) => {
   if (!existing) throw notFound("Student");
   if (existing.status === "APPROVED") throw new HttpError(409, "This student is already approved.");
   const student = await prisma.student.update({ where: { id: existing.id }, data: { status: "REJECTED", reviewNote: reason, reviewedAt: new Date() } });
-  await sendStudentRejected(student.email, { fullName: student.fullName, reason });
   res.json(student);
 });
 
@@ -269,7 +339,6 @@ refereesRouter.get("/", async (req, res) => {
 
 refereesRouter.post("/", async (req, res) => {
   const data = refereeSchema.parse(req.body);
-  assertEmailVerified(req.body?.emailVerificationToken, data.email);
   const referee = await prisma.referee.create({ data });
   res.status(201).json(referee);
 });
@@ -279,7 +348,6 @@ refereesRouter.put("/:id", async (req, res) => {
   const data = refereeSchema.parse(req.body);
   const existing = await prisma.referee.findUnique({ where: { id }, select: { email: true } });
   if (!existing) throw notFound("Referee");
-  if (existing.email.toLowerCase() !== data.email.toLowerCase()) assertEmailVerified(req.body?.emailVerificationToken, data.email);
   const referee = await prisma.referee.update({ where: { id }, data });
   res.json(referee);
 });

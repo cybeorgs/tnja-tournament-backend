@@ -4,7 +4,6 @@ import prisma from "../db.js";
 import { HttpError } from "../middleware/errors.js";
 import { getSettings } from "./helpers.js";
 import { isKnownLocation, lookupPincode } from "./locations.js";
-import { assertEmailVerified } from "./emailOtp.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -134,26 +133,24 @@ async function nextStudentNo(tx: Tx): Promise<string> {
 }
 
 /**
- * Create a student. The email must have been verified by OTP.
+ * Create a student.
  * Students added by an admin, and Tamil Nadu residents, get their permanent ID straight away;
  * anyone else registering themselves waits (PENDING) until an admin approves their documents.
  */
 export async function createStudent(
   tx: Tx,
   data: StudentData,
-  emailVerificationToken: unknown,
   {
     source = "ADMIN",
     documents = [],
-    bulkImport = false,
+    bulkImport: _bulkImport = false,
   }: {
     source?: "ADMIN" | "SELF";
     documents?: StudentUpload[];
-    /** Admin bulk import from a spreadsheet: there is no one-time code per email to check */
+    /** Admin bulk import from a spreadsheet */
     bulkImport?: boolean;
   } = {},
 ) {
-  if (!(bulkImport && source === "ADMIN")) assertEmailVerified(emailVerificationToken, data.email);
   await assertAadhaarFree(tx, data.aadhaarNumber);
   const approved = source === "ADMIN" || !data.outsideTamilNadu;
   const student = await tx.student.create({

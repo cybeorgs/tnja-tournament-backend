@@ -35,27 +35,22 @@ tournamentDrawsRouter.get("/categories", async (req, res) => {
   const tournamentId = param(req, "id");
   await findTournament(tournamentId);
   const [registrations, draws] = await Promise.all([
-    prisma.registration.findMany({ where: { tournamentId }, select: { id: true, ageGroup: true, gender: true, weightCategory: true, paymentStatus: true, weighInStatus: true } }),
+    prisma.registration.findMany({ where: { tournamentId }, select: { id: true, ageGroup: true, gender: true, weightCategory: true, weighInStatus: true } }),
     prisma.draw.findMany({ where: { tournamentId } }),
   ]);
 
-  type WeighIn = { cleared: number; pending: number; pendingPaid: number; disqualified: number };
-  type Category = { ageGroup: string; gender: string; weightCategory: string; regIds: string[]; paid: number; weighIn: WeighIn };
+  type WeighIn = { cleared: number; pending: number; disqualified: number };
+  type Category = { ageGroup: string; gender: string; weightCategory: string; regIds: string[]; weighIn: WeighIn };
   const categories = new Map<string, Category>();
   for (const r of registrations) {
     const key = categoryKey(r);
-    const c = categories.get(key) ?? { ageGroup: r.ageGroup, gender: r.gender, weightCategory: r.weightCategory, regIds: [], paid: 0, weighIn: { cleared: 0, pending: 0, pendingPaid: 0, disqualified: 0 } };
-    const paid = r.paymentStatus !== "PENDING";
+    const c = categories.get(key) ?? { ageGroup: r.ageGroup, gender: r.gender, weightCategory: r.weightCategory, regIds: [], weighIn: { cleared: 0, pending: 0, disqualified: 0 } };
     if (r.weighInStatus === "DISQUALIFIED") {
       c.weighIn.disqualified++; // disqualified players don't take part
     } else {
       c.regIds.push(r.id);
-      if (paid) c.paid++;
       if (r.weighInStatus === "CLEARED") c.weighIn.cleared++;
-      else {
-        c.weighIn.pending++;
-        if (paid) c.weighIn.pendingPaid++;
-      }
+      else c.weighIn.pending++;
     }
     categories.set(key, c);
   }
@@ -66,8 +61,8 @@ tournamentDrawsRouter.get("/categories", async (req, res) => {
     const drawnIds = new Set(draw?.entrants.map((e) => e.id) ?? []);
     return {
       ageGroup: c.ageGroup, gender: c.gender, weightCategory: c.weightCategory,
-      entrants: c.regIds.length, paid: c.paid,
-      /** The draw waits until pending is 0 (pendingPaid when only paid entries are drawn) */
+      entrants: c.regIds.length,
+      /** The draw waits until pending is 0 */
       weighIn: c.weighIn,
       draw: draw && {
         id: draw.id, format: draw.format, isConcluded: draw.isConcluded, matNumber: draw.matNumber,
@@ -101,8 +96,6 @@ const generateSchema = z.object({
   seedIds: z.array(z.string()).max(4).default([]),
   /** Manual draw instead of an automatic one */
   manual: manualSchema.optional(),
-  /** Leave out entries whose fee is still pending */
-  onlyPaid: z.boolean().default(false),
   matNumber: z.coerce.number().int().min(1).max(20).optional(),
   /** Replace a draw that already has results */
   force: z.boolean().default(false),
@@ -119,11 +112,11 @@ async function buildDraw(tournamentId: string, numberOfMats: number, input: z.in
   if (input.matNumber && input.matNumber > numberOfMats) throw new HttpError(400, `This tournament only has ${numberOfMats} mat(s).`);
 
   const registrations = await prisma.registration.findMany({
-    where: { ...where, weighInStatus: { not: "DISQUALIFIED" }, ...(input.onlyPaid ? { paymentStatus: { in: ["PAID", "WAIVED"] } } : {}) },
+    where: { ...where, weighInStatus: { not: "DISQUALIFIED" } },
     include: { student: true },
     orderBy: { createdAt: "asc" },
   });
-  if (!registrations.length) throw new HttpError(400, input.onlyPaid ? "No paid entries in this category yet." : "No students are registered in this category.");
+  if (!registrations.length) throw new HttpError(400, "No students are registered in this category.");
   // Weigh-in comes first: hold the draw while anyone who would be in it hasn't been weighed.
   const notWeighed = registrations.filter((r) => r.weighInStatus !== "CLEARED");
   if (notWeighed.length) {
@@ -155,7 +148,7 @@ tournamentDrawsRouter.post("/draws", async (req, res) => {
 /** Generate draws for every category that doesn't have one yet, spreading them across mats. */
 tournamentDrawsRouter.post("/draws/generate-all", async (req, res) => {
   const tournament = await findTournament(param(req, "id"));
-  const { format, onlyPaid } = z.object({ format: generateSchema.shape.format, onlyPaid: z.boolean().default(false) }).parse(req.body);
+  const { format } = z.object({ format: generateSchema.shape.format }).parse(req.body);
   const [registrations, draws] = await Promise.all([
     prisma.registration.findMany({ where: { tournamentId: tournament.id }, select: { ageGroup: true, gender: true, weightCategory: true } }),
     prisma.draw.findMany({ where: { tournamentId: tournament.id }, select: { ageGroup: true, gender: true, weightCategory: true } }),
@@ -169,7 +162,7 @@ tournamentDrawsRouter.post("/draws/generate-all", async (req, res) => {
     try {
       await buildDraw(tournament.id, tournament.numberOfMats, {
         ageGroup: c.ageGroup, gender: c.gender as "MALE" | "FEMALE", weightCategory: c.weightCategory,
-        format, onlyPaid, seedIds: [], force: false, matNumber: (i % tournament.numberOfMats) + 1, fallback: true,
+        format, seedIds: [], force: false, matNumber: (i % tournament.numberOfMats) + 1, fallback: true,
       });
       created++;
     } catch (err) {

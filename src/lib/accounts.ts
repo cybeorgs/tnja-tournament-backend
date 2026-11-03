@@ -1,6 +1,7 @@
 // Student (and parent) logins. One account per email covers every student registered with it.
-// Passwords are never emailed: a new account gets an unguessable random password nobody knows, and
-// the welcome email carries a one-time link to set their own. "Forgot password" works the same way.
+// When a student registers, the registration email carries their username (the email) and a
+// temporary password generated here; they can change it after logging in. "Forgot password" emails
+// a one-time link to choose a new one.
 import crypto from "crypto";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
@@ -41,8 +42,24 @@ export function passwordLink(account: Account, purpose: "welcome" | "reset") {
   return `${env.publicSiteUrl.replace(/\/+$/, "")}/student/set-password?token=${encodeURIComponent(token)}`;
 }
 
-/** For the registration email: a set-password link when the account is new, otherwise null (they already have a password). */
-export const welcomeLink = (account: Account & { created: boolean }) => (account.created ? passwordLink(account, "welcome") : null);
+// Easy to read and type: no 0/O, 1/l/I.
+const PASSWORD_CHARS = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+/** A random 10-character password. */
+export function generatePassword(length = 10) {
+  const bytes = crypto.randomBytes(length);
+  return Array.from(bytes, (b) => PASSWORD_CHARS[b % PASSWORD_CHARS.length]).join("");
+}
+
+/**
+ * Give the account a new temporary password (for the registration email) and return it. It counts as
+ * not chosen by the owner (passwordSetAt stays empty) until they change it.
+ */
+export async function issueTemporaryPassword(accountId: string) {
+  const password = generatePassword();
+  await prisma.studentAccount.update({ where: { id: accountId }, data: { passwordHash: await hashPassword(password), passwordSetAt: null } });
+  return password;
+}
 
 /** The account the link is for, if the token is valid and hasn't been used yet; otherwise null. */
 export async function accountFromPasswordToken(token: string) {

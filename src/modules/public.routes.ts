@@ -47,7 +47,7 @@ router.get("/meta", (_req, res) => {
 
 const publicTournamentFields = {
   id: true, slug: true, title: true, description: true, venue: true, city: true, startDate: true, endDate: true,
-  level: true, gender: true, ageGroups: true, entryFee: true, registrationOpensAt: true, registrationClosesAt: true, numberOfMats: true, status: true, resultsPublished: true, publishedAt: true,
+  level: true, gender: true, ageGroups: true, registrationOpensAt: true, registrationClosesAt: true, numberOfMats: true, status: true, resultsPublished: true, publishedAt: true,
 } as const;
 
 router.get("/tournaments", async (_req, res) => {

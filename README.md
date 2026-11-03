@@ -34,7 +34,6 @@ Run the engine tests (no database needed): `npm test`.
 | `JWT_SECRET` | At least 32 random characters |
 | `ADMIN_USERNAME`, `ADMIN_PASSWORD` | First admin account |
 | `PUBLIC_SITE_URL` | Printed on certificates as the verification address |
-| `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Optional; online payment is disabled when blank |
 
 ## Workflow and endpoints
 

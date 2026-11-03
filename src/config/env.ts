@@ -18,8 +18,6 @@ export const env = {
   adminPassword: process.env.ADMIN_PASSWORD || "",
   /** Public site URL printed on certificates for verification, e.g. https://tournament.example.in */
   publicSiteUrl: process.env.PUBLIC_SITE_URL || "",
-  razorpayKeyId: process.env.RAZORPAY_KEY_ID || "",
-  razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || "",
   isProduction: process.env.NODE_ENV === "production",
   smtp: {
     host: process.env.SMTP_HOST || "",

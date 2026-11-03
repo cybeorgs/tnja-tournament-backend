@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import crypto from "crypto";
 import type { Request } from "express";
 import prisma from "../db.js";
@@ -27,8 +28,25 @@ export function slugify(title: string): string {
   return `${base || "tournament"}-${randomCode(4).toLowerCase()}`;
 }
 
-export function getSettings() {
-  return prisma.settings.upsert({ where: { id: "default" }, update: {}, create: { id: "default" } });
+/** The TNJA logo shipped with the app (assets/tnja-logo.jpeg): used until an admin uploads their own. */
+let defaultLogo: { data: Uint8Array<ArrayBuffer>; mime: string } | null | undefined;
+export function getDefaultLogo() {
+  if (defaultLogo === undefined) {
+    try {
+      defaultLogo = { data: Uint8Array.from(readFileSync(new URL("../../assets/tnja-logo.jpeg", import.meta.url))), mime: "image/jpeg" };
+    } catch (err) {
+      console.error("Default logo (assets/tnja-logo.jpeg) not found:", err);
+      defaultLogo = null;
+    }
+  }
+  return defaultLogo;
+}
+
+/** Settings, with the TNJA logo filled in when none has been uploaded (customLogo says which). */
+export async function getSettings() {
+  const settings = await prisma.settings.upsert({ where: { id: "default" }, update: {}, create: { id: "default" } });
+  const fallback = settings.logo ? null : getDefaultLogo();
+  return { ...settings, customLogo: !!settings.logo, logo: settings.logo ?? fallback?.data ?? null, logoMime: settings.logoMime ?? fallback?.mime ?? null };
 }
 
 /** Route param as a string (Express 5 types params as string | string[]). */

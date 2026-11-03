@@ -1,12 +1,13 @@
+import type { Settings } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import prisma from "../db.js";
 import { HttpError } from "../middleware/errors.js";
-import { getSettings } from "../lib/helpers.js";
+import { getDefaultLogo, getSettings } from "../lib/helpers.js";
 
 const router = Router();
 
-const publicView = (s: Awaited<ReturnType<typeof getSettings>>) => ({
+const publicView = (s: Omit<Settings, "logo"> & { logo: Uint8Array | null; customLogo?: boolean }) => ({
   orgName: s.orgName,
   orgShortName: s.orgShortName,
   tagline: s.tagline,
@@ -14,7 +15,9 @@ const publicView = (s: Awaited<ReturnType<typeof getSettings>>) => ({
   signatory1Title: s.signatory1Title,
   signatory2Name: s.signatory2Name,
   signatory2Title: s.signatory2Title,
-  hasLogo: !!s.logo,
+  hasLogo: !!s.logo || !!getDefaultLogo(),
+  /** false: the built-in TNJA logo is shown */
+  customLogo: s.customLogo ?? !!s.logo,
   updatedAt: s.updatedAt,
 });
 

@@ -1,7 +1,7 @@
 // Student (and parent) logins. One account per email covers every student registered with it.
-// The account is created when a student registers — before, and independent of, any payment.
+// The account is created when a student registers.
 // Passwords are never emailed: the welcome email and "forgot password" both send a one-time link
-// to set one. A logged-in student sees their registration details and can pay pending entry fees.
+// to set one. A logged-in student sees their registration details and tournament entries.
 import { Router } from "express";
 import bcrypt from "bcrypt";
 import { z } from "zod";
@@ -11,9 +11,7 @@ import { HttpError, notFound } from "../middleware/errors.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 import { accountFromPasswordToken, hashPassword, passwordLink, unusablePasswordHash } from "../lib/accounts.js";
 import { sendPasswordReset } from "../lib/mailer.js";
-import { confirmOrderPayment, createEntryOrder, getRazorpay, verifySchema } from "../lib/payments.js";
-import { param } from "../lib/helpers.js";
-import { registrationPhase, repriceUnpaid } from "../lib/fees.js";
+import { tempIdOf } from "../lib/registrationEmails.js";
 
 const email = z.email("Enter a valid email address").transform((e) => e.trim().toLowerCase());
 const newPassword = z.string().min(8, "Password must be at least 8 characters").max(200);
@@ -23,11 +21,38 @@ const DUMMY_HASH = bcrypt.hashSync("not-a-real-password", 10);
 
 export const studentAuthRouter = Router();
 
+/**
+ * The email a login name belongs to: the email itself, a permanent student ID (TNJA-S-000123) or the
+ * temporary ID given to applicants waiting for approval (TMP-1A2B3C4D).
+ */
+async function emailForLogin(login: string): Promise<string | null> {
+  const value = login.trim();
+  if (value.includes("@")) return value.toLowerCase();
+  const upper = value.toUpperCase();
+  const temp = /^TMP-([0-9A-F]{8})$/.exec(upper);
+  if (temp) {
+    const hex = temp[1]!.toLowerCase();
+    const matches = await prisma.student.findMany({ where: { id: { startsWith: hex } }, select: { email: true }, take: 2 });
+    return matches.length === 1 ? matches[0]!.email.toLowerCase() : null;
+  }
+  const student = await prisma.student.findUnique({ where: { studentNo: upper }, select: { email: true } });
+  return student?.email.toLowerCase() ?? null;
+}
+
 studentAuthRouter.post("/login", rateLimit({ windowMs: 15 * 60 * 1000, max: 20 }), async (req, res) => {
-  const input = z.object({ email, password: z.string().min(1, "Password is required") }).parse(req.body);
-  const account = await prisma.studentAccount.findUnique({ where: { email: input.email } });
+  const input = z
+    .object({
+      /** Email, student ID or temporary ID (older clients send "email") */
+      login: z.string().trim().min(3, "Enter your email or student ID").max(254).optional(),
+      email: z.string().trim().max(254).optional(),
+      password: z.string().min(1, "Password is required"),
+    })
+    .refine((v) => v.login || v.email, { message: "Enter your email or student ID", path: ["login"] })
+    .parse(req.body);
+  const accountEmail = await emailForLogin(input.login ?? input.email!);
+  const account = accountEmail ? await prisma.studentAccount.findUnique({ where: { email: accountEmail } }) : null;
   const ok = await bcrypt.compare(input.password, account?.passwordHash || DUMMY_HASH);
-  if (!account || !ok) throw new HttpError(401, "Incorrect email or password. If you haven't set a password yet, use the link in your registration email or “Forgot password”.");
+  if (!account || !ok) throw new HttpError(401, "Incorrect username or password. Use the username and password from your registration email, or “Forgot password”.");
   res.json({ token: signStudentToken({ accountId: account.id, email: account.email }) });
 });
 
@@ -63,9 +88,6 @@ studentRouter.use(requireStudent);
 
 /** The account and every student registered with its email: their registration details and tournament entries. */
 studentRouter.get("/me", async (req, res) => {
-  // Unpaid entries show the fee that applies now (the late fee once the regular deadline has passed).
-  const owing = await prisma.registration.findMany({ where: { paymentStatus: "PENDING", student: { email: req.student!.email } }, select: { tournament: true }, distinct: ["tournamentId"] });
-  for (const { tournament } of owing) await repriceUnpaid(tournament);
   const students = await prisma.student.findMany({
     where: { email: req.student!.email },
     orderBy: { createdAt: "asc" },
@@ -77,14 +99,14 @@ studentRouter.get("/me", async (req, res) => {
       registrations: {
         orderBy: { createdAt: "desc" },
         select: {
-          id: true, ageGroup: true, gender: true, weightCategory: true, paymentStatus: true, placement: true, fee: true, isLate: true, amountPaid: true,
+          id: true, ageGroup: true, gender: true, weightCategory: true, weightKg: true, placement: true, isLate: true, weighInStatus: true,
           tournament: { select: { id: true, slug: true, title: true, startDate: true, endDate: true, venue: true, city: true, status: true } },
         },
       },
     },
   });
   // Only the last 4 Aadhaar digits leave the server.
-  res.json({ email: req.student!.email, students: students.map((s) => ({ ...s, aadhaarNumber: s.aadhaarNumber ? `XXXX XXXX ${s.aadhaarNumber.slice(-4)}` : null })) });
+  res.json({ email: req.student!.email, students: students.map((s) => ({ ...s, tempId: s.studentNo ? null : tempIdOf(s), aadhaarNumber: s.aadhaarNumber ? `XXXX XXXX ${s.aadhaarNumber.slice(-4)}` : null })) });
 });
 
 studentRouter.post("/change-password", async (req, res) => {
@@ -97,40 +119,3 @@ studentRouter.post("/change-password", async (req, res) => {
   res.json({ message: "Password changed." });
 });
 
-// ─── Paying later ────────────────────────────────────────────────────────────
-// Entries stay "pending" when the fee isn't paid at registration. The student pays them from their
-// dashboard any time before the tournament starts (when registration and its payments close). Each
-// entry costs the fee stored when it was made — a regular entry paid during late registration still
-// costs the regular fee.
-
-const paymentLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30 });
-
-/** One payment order for all of a student's unpaid entries in a tournament. */
-studentRouter.post("/tournaments/:tournamentId/payment", paymentLimiter, async (req, res) => {
-  const { studentId } = z.object({ studentId: z.string().uuid() }).parse(req.body);
-  const tournament = await prisma.tournament.findUnique({ where: { id: param(req, "tournamentId") } });
-  if (!tournament) throw notFound("Tournament");
-  if (registrationPhase(tournament) === "CLOSED") throw new HttpError(409, "This tournament has started, so entry fees can no longer be paid online. Please contact the organiser.");
-  // The student must belong to the logged-in account.
-  const student = await prisma.student.findFirst({ where: { id: studentId, email: req.student!.email }, select: { id: true } });
-  if (!student) throw notFound("Student");
-  const pending = await prisma.registration.findMany({
-    where: { tournamentId: tournament.id, studentId: student.id, paymentStatus: "PENDING" },
-    include: { student: true },
-  });
-  if (!pending.length) throw new HttpError(409, "There's nothing left to pay for this tournament.");
-  try {
-    getRazorpay();
-  } catch {
-    throw new HttpError(503, "Online payment isn't available right now. Please contact the organiser.");
-  }
-  const order = await createEntryOrder(pending, tournament);
-  if (!order) throw new HttpError(409, "This has already been paid — refresh the page to see it.");
-  res.json(order);
-});
-
-/** Razorpay hands back a signed payment; confirm it and mark those entries paid. */
-studentRouter.post("/tournaments/:tournamentId/payment/verify", paymentLimiter, async (req, res) => {
-  const paid = await confirmOrderPayment(param(req, "tournamentId"), verifySchema.parse(req.body));
-  res.json({ paid: paid.length });
-});
