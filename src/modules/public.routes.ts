@@ -33,7 +33,7 @@ router.get("/logo", async (_req, res) => {
 router.get("/meta", (_req, res) => {
   res.json({
     ageGroups: AGE_GROUPS.map((g) => ({
-      name: g.name, minAge: g.minAge, maxAge: g.maxAge,
+      name: g.name, minAge: g.minAge, maxAge: g.maxAge, playUpFrom: g.playUpFrom ?? g.minAge,
       weightClasses: {
         MALE: [...g.weights.MALE.map((w) => `-${w}kg`), `+${g.weights.MALE.at(-1)}kg`],
         FEMALE: [...g.weights.FEMALE.map((w) => `-${w}kg`), `+${g.weights.FEMALE.at(-1)}kg`],

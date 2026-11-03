@@ -172,6 +172,12 @@ model Registration {
   gender            String
   weightKg          Float
   weightCategory    String
+  /// PENDING (not weighed yet) | CLEARED (scale weight is within weightCategory) | DISQUALIFIED (left out of the draw).
+  /// A category's draw can only be generated once none of its entrants is PENDING.
+  weighInStatus     String    @default("PENDING")
+  /// Scale weight recorded at the weigh-in
+  weighInKg         Float?
+  weighedAt         DateTime?
   /// FIRST | SECOND | THIRD | PARTICIPATION — set when the category is concluded
   placement         String?
   /// Unique, hard-to-guess number printed on the certificate and used for public verification
@@ -206,6 +212,7 @@ model Registration {
   @@unique([tournamentId, studentId, ageGroup])
   @@index([tournamentId, ageGroup, gender, weightCategory])
   @@index([razorpayOrderId])
+  @@index([tournamentId, weighInStatus])
 }
 
 /// Master list of referees and technical officials.

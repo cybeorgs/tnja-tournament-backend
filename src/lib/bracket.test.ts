@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computePlacements, generateDraw, generateElimination, recordResult, resetResult, type Entrant, type Rounds } from "./bracket.js";
+import { computePlacements, generateDraw, generateElimination, recordResult, redraw, resetResult, type Entrant, type Rounds } from "./bracket.js";
 import { eligibleAgeGroups, weightCategoryFor } from "./categories.js";
 
 const people = (n: number, clubs = 3): Entrant[] =>
@@ -108,6 +108,106 @@ test("age groups follow birth year relative to the tournament year", () => {
   const all = ["Sub-Junior", "Cadet", "Junior", "Senior"];
   assert.deepEqual(eligibleAgeGroups(new Date("2012-05-01"), new Date("2026-11-20"), all), ["Sub-Junior"]);
   assert.deepEqual(eligibleAgeGroups(new Date("2009-05-01"), new Date("2026-11-20"), all), ["Cadet", "Junior", "Senior"]);
+  // Cadet 15–17 → Cadet, Junior, Senior · Junior 18–20 → Junior, Senior · Senior 21+ → Senior
+  const at = (age: number) => eligibleAgeGroups(new Date(`${2026 - age}-05-01`), new Date("2026-11-20"), all);
+  assert.deepEqual(at(15), ["Cadet", "Junior", "Senior"]);
+  assert.deepEqual(at(18), ["Junior", "Senior"]);
+  assert.deepEqual(at(20), ["Junior", "Senior"]);
+  assert.deepEqual(at(21), ["Senior"]);
+  assert.deepEqual(at(40), ["Senior"]);
+  // Only the groups the tournament contests are offered
+  assert.deepEqual(eligibleAgeGroups(new Date("2011-05-01"), new Date("2026-11-20"), ["Junior", "Senior"]), ["Junior", "Senior"]);
   assert.equal(weightCategoryFor(47.2, "Sub-Junior", "MALE"), "-50kg");
   assert.equal(weightCategoryFor(70, "Sub-Junior", "MALE"), "+66kg");
+});
+
+// ─── Repechage, manual draws ─────────────────────────────────────────────────
+
+const ids = (n: number) => Array.from({ length: n }, (_, i) => `p${i + 1}`);
+const medals = (entrants: Entrant[], rounds: Rounds) => {
+  const { placements, complete } = computePlacements(entrants, rounds);
+  const of = (p: string) => Object.entries(placements).filter(([, v]) => v === p).map(([k]) => k).sort();
+  return { complete, first: of("FIRST"), second: of("SECOND"), third: of("THIRD") };
+};
+
+test("double repechage: QF losers of each half meet, winners fight the other half's SF loser, two bronzes", () => {
+  const entrants = people(8);
+  // Manual: p1 v p2, p3 v p4, p5 v p6, p7 v p8 — slot A always wins
+  let rounds = generateDraw(entrants, "DOUBLE_REPECHAGE", [], { slots: ids(8) }).rounds;
+  assert.equal(rounds.length, 5); // QF, SF, final, repechage, bronze
+  assert.equal(rounds[2]!.length, 1); // the final round has no bronze match
+  rounds = playAll(rounds);
+  const byId = new Map(rounds.flat().map((m) => [m.matchId, m]));
+  // QF losers p2, p4 (top half) and p6, p8 (bottom half)
+  assert.deepEqual([byId.get("REP1")!.slotA.playerId, byId.get("REP1")!.slotB.playerId], ["p2", "p4"]);
+  assert.deepEqual([byId.get("REP2")!.slotA.playerId, byId.get("REP2")!.slotB.playerId], ["p6", "p8"]);
+  // SF: p1 beat p3, p5 beat p7. Bronze 1 = REP1 winner v bottom SF loser; Bronze 2 = REP2 winner v top SF loser
+  assert.deepEqual([byId.get("BR1")!.slotA.playerId, byId.get("BR1")!.slotB.playerId], ["p2", "p7"]);
+  assert.deepEqual([byId.get("BR2")!.slotA.playerId, byId.get("BR2")!.slotB.playerId], ["p6", "p3"]);
+  assert.deepEqual(medals(entrants, rounds), { complete: true, first: ["p1"], second: ["p5"], third: ["p2", "p6"] });
+});
+
+test("single repechage: champion's QF and SF victims meet, winner fights the runner-up's SF victim, one bronze", () => {
+  const entrants = people(8);
+  let rounds = generateDraw(entrants, "REPECHAGE", [], { slots: ids(8) }).rounds;
+  // Repechage waits for the final
+  rounds = playAll(rounds);
+  const byId = new Map(rounds.flat().map((m) => [m.matchId, m]));
+  // Champion p1 beat p2 (QF) and p3 (SF); runner-up p5 beat p7 in the SF
+  assert.deepEqual([byId.get("REP1")!.slotA.playerId, byId.get("REP1")!.slotB.playerId], ["p2", "p3"]);
+  assert.deepEqual([byId.get("BR1")!.slotA.playerId, byId.get("BR1")!.slotB.playerId], ["p2", "p7"]);
+  assert.deepEqual(medals(entrants, rounds), { complete: true, first: ["p1"], second: ["p5"], third: ["p2"] });
+});
+
+test("repechage with BYEs completes, and needs at least 5 players", () => {
+  for (const n of [5, 6, 7, 11]) {
+    for (const format of ["REPECHAGE", "DOUBLE_REPECHAGE"] as const) {
+      const entrants = people(n);
+      const rounds = playAll(generateDraw(entrants, format).rounds);
+      const m = medals(entrants, rounds);
+      assert.equal(m.complete, true, `${format} ${n}`);
+      assert.equal(m.first.length, 1);
+      assert.ok(m.third.length >= 1 && m.third.length <= (format === "REPECHAGE" ? 1 : 2));
+    }
+  }
+  assert.throws(() => generateDraw(people(4), "DOUBLE_REPECHAGE"), /at least 5/);
+});
+
+test("results the repechage depends on can't be undone while it has results", () => {
+  const entrants = people(8);
+  const rounds = playAll(generateDraw(entrants, "DOUBLE_REPECHAGE", [], { slots: ids(8) }).rounds);
+  assert.throws(() => resetResult(rounds, "R1M1"), /R2M1/);
+  // The semi-final decides who is in a bronze match; the final doesn't feed double repechage
+  const finalChanged = win(resetResult(rounds, "R3M1"), "R3M1", "B");
+  assert.deepEqual(medals(entrants, finalChanged).first, ["p5"]);
+  assert.throws(() => resetResult(win(resetResult(rounds, "R3M1"), "R3M1"), "R2M1"), /R3M1/);
+  assert.throws(() => resetResult(rounds, "REP1"), /Bronze 1/);
+  // Single repechage: the final decides who enters, so it is locked once the repechage is played
+  const single = playAll(generateDraw(entrants, "REPECHAGE", [], { slots: ids(8) }).rounds);
+  assert.throws(() => resetResult(single, "R3M1"), /repechage/);
+  const undone = resetResult(resetResult(rounds, "BR1"), "REP1");
+  assert.equal(undone.flat().find((m) => m.matchId === "BR1")!.slotA.playerName, "TBD");
+});
+
+test("manual elimination draw: exact pairings, validation, BYEs advance", () => {
+  const entrants = people(6);
+  const slots = ["p6", "p1", "p2", null, "p3", "p4", null, "p5"];
+  const rounds = generateDraw(entrants, "ELIMINATION", [], { slots }).rounds;
+  assert.deepEqual(rounds[0]!.map((m) => [m.slotA.playerId, m.slotB.playerId]), [["p6", "p1"], ["p2", null], ["p3", "p4"], [null, "p5"]]);
+  assert.equal(rounds[1]![0]!.slotB.playerId, "p2"); // p2's BYE sent them through
+  assert.equal(rounds[1]![1]!.slotB.playerId, "p5");
+  assert.throws(() => generateDraw(entrants, "ELIMINATION", [], { slots: ["p1", "p1", "p2", null, "p3", "p4", null, "p5"] }), /more than once/);
+  assert.throws(() => generateDraw(entrants, "ELIMINATION", [], { slots: ["p1", "p6", "p2", "p3", null, null, "p4", "p5"] }), /no players/);
+  assert.throws(() => generateDraw(entrants, "ELIMINATION", [], { slots: ["p1", "p6"] }), /8 places/);
+});
+
+test("manual round robin keeps the pool order; pairings can be edited until a match is played", () => {
+  const entrants = people(4);
+  const rounds = generateDraw(entrants, "ROUND_ROBIN", [], { order: ["p4", "p3", "p2", "p1"] }).rounds;
+  assert.deepEqual([rounds[0]![0]!.slotA.playerId, rounds[0]![0]!.slotB.playerId], ["p4", "p1"]);
+
+  const elim = generateDraw(people(4), "ELIMINATION").rounds;
+  const edited = redraw("ELIMINATION", people(4), elim, { slots: ["p1", "p2", "p3", "p4"] });
+  assert.deepEqual(edited[0]!.map((m) => [m.slotA.playerId, m.slotB.playerId]), [["p1", "p2"], ["p3", "p4"]]);
+  assert.throws(() => redraw("ELIMINATION", people(4), win(edited, "R1M1"), { slots: ["p1", "p3", "p2", "p4"] }), /already been played/);
 });

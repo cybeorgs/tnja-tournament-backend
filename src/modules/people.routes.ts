@@ -1,5 +1,5 @@
 // Master lists: students (athletes) and referees. Both are reusable across tournaments.
-import { Router } from "express";
+import express, { Router } from "express";
 import { z } from "zod";
 import prisma from "../db.js";
 import { HttpError, notFound } from "../middleware/errors.js";
@@ -7,6 +7,8 @@ import { param } from "../lib/helpers.js";
 import { DOCUMENT_KINDS, approveStudent, assertAadhaarFree, confirmResidency, createStudent, studentSchema } from "../lib/students.js";
 import { assertEmailVerified } from "../lib/emailOtp.js";
 import { ensureAccount, welcomeLink } from "../lib/accounts.js";
+import { DATE, DATE_TIME, maskAadhaar, sendWorkbook, yearAge, type Column } from "../lib/excel.js";
+import { checkRows, readSheet, templateWorkbook } from "../lib/studentImport.js";
 import { sendStudentApproved, sendStudentRegistered, sendStudentRejected } from "../lib/mailer.js";
 
 const listQuery = z.object({
@@ -19,15 +21,21 @@ const listQuery = z.object({
 
 export const studentsRouter = Router();
 
-studentsRouter.get("/", async (req, res) => {
-  const { q, page, pageSize } = listQuery.parse(req.query);
-  const status = z.enum(["APPROVED", "PENDING", "REJECTED"]).optional().parse(req.query.status || undefined);
+function studentWhere(query: unknown) {
+  const { q } = z.object({ q: z.string().trim().optional() }).parse(query);
+  const status = z.enum(["APPROVED", "PENDING", "REJECTED"]).optional().parse((query as Record<string, unknown>).status || undefined);
   const where = {
     ...(status ? { status } : {}),
     ...(q
       ? { OR: [{ fullName: { contains: q, mode: "insensitive" as const } }, { studentNo: { contains: q, mode: "insensitive" as const } }, { club: { contains: q, mode: "insensitive" as const } }, { phone: { contains: q } }, { email: { contains: q.toLowerCase() } }] }
       : {}),
   };
+  return { where, status };
+}
+
+studentsRouter.get("/", async (req, res) => {
+  const { page, pageSize } = listQuery.parse(req.query);
+  const { where, status } = studentWhere(req.query);
   const [items, total, pending] = await Promise.all([
     prisma.student.findMany({
       where, orderBy: status === "PENDING" ? { createdAt: "asc" } : { fullName: "asc" }, skip: (page - 1) * pageSize, take: pageSize,
@@ -37,6 +45,112 @@ studentsRouter.get("/", async (req, res) => {
     prisma.student.count({ where: { status: "PENDING" } }),
   ]);
   res.json({ items, total, page, pageSize, pending });
+});
+
+/** Every student matching the list's search and status filter, as an Excel sheet. Aadhaar numbers are masked. */
+studentsRouter.get("/export", async (req, res) => {
+  const { where, status } = studentWhere(req.query);
+  const students = await prisma.student.findMany({ where, orderBy: { fullName: "asc" }, include: { _count: { select: { registrations: true } } } });
+  type S = (typeof students)[number];
+  const columns: Column<S>[] = [
+    { header: "Student ID", width: 16, value: (s) => s.studentNo },
+    { header: "Status", value: (s) => s.status },
+    { header: "Full name", width: 26, value: (s) => s.fullName },
+    { header: "Gender", value: (s) => s.gender },
+    { header: "Date of birth", value: (s) => s.dob, format: DATE },
+    { header: "Age (this year)", value: (s) => yearAge(s.dob) },
+    { header: "Father's name", width: 22, value: (s) => s.fatherName },
+    { header: "Mother's name", width: 22, value: (s) => s.motherName },
+    { header: "Phone", width: 14, value: (s) => s.phone },
+    { header: "Alternate phone", width: 14, value: (s) => s.alternatePhone },
+    { header: "Email", width: 28, value: (s) => s.email },
+    { header: "Blood group", value: (s) => s.bloodGroup },
+    { header: "Aadhaar", width: 18, value: (s) => maskAadhaar(s.aadhaarNumber) },
+    { header: "Club", width: 22, value: (s) => s.club },
+    { header: "Coach", width: 20, value: (s) => s.coachName },
+    { header: "Belt", value: (s) => s.belt },
+    { header: "District", width: 16, value: (s) => s.district },
+    { header: "Taluk", width: 16, value: (s) => s.taluk },
+    { header: "Address", width: 36, value: (s) => s.address },
+    { header: "City", width: 16, value: (s) => s.city },
+    { header: "State", width: 16, value: (s) => s.state },
+    { header: "Pincode", value: (s) => s.pincode },
+    { header: "Residing pincode", value: (s) => s.residingPincode },
+    { header: "Nationality", value: (s) => s.nationality },
+    { header: "Outside Tamil Nadu", value: (s) => s.outsideTamilNadu },
+    { header: "BPL", value: (s) => s.isBPL },
+    { header: "Annual income", value: (s) => s.annualIncome, format: "#,##0" },
+    { header: "Institution type", value: (s) => s.institutionType },
+    { header: "Institution", width: 28, value: (s) => s.institutionName },
+    { header: "Standard / year", value: (s) => s.grade },
+    { header: "Department", width: 18, value: (s) => s.degreeDepartment },
+    { header: "Registered by", value: (s) => (s.source === "SELF" ? "Self" : "Admin") },
+    { header: "Tournaments entered", value: (s) => s._count.registrations },
+    { header: "Registered on", value: (s) => s.createdAt, format: DATE_TIME },
+  ];
+  const stamp = new Date().toISOString().slice(0, 10);
+  await sendWorkbook(res, `students${status ? `_${status.toLowerCase()}` : ""}_${stamp}.xlsx`, "Students", columns, students);
+});
+
+// ─── Bulk import ─────────────────────────────────────────────────────────────
+
+studentsRouter.get("/import/template", async (_req, res) => {
+  const workbook = await templateWorkbook();
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", 'attachment; filename="students_import_template.xlsx"');
+  await workbook.xlsx.write(res);
+  res.end();
+});
+
+/**
+ * Import students from the template (.xlsx or .csv), sent as the raw request body with the file name in
+ * X-Filename. ?dryRun=1 only checks every row. Otherwise the valid rows are created (rows with problems are
+ * skipped and listed) and, with ?sendEmails=1, each new account gets its set-password link by email.
+ */
+studentsRouter.post("/import", express.raw({ type: () => true, limit: "5mb" }), async (req, res) => {
+  const file = req.body;
+  if (!Buffer.isBuffer(file) || !file.length) throw new HttpError(400, "Choose a file to import.");
+  const filename = decodeURIComponent(String(req.headers["x-filename"] ?? "students.xlsx"));
+  const dryRun = req.query.dryRun === "1";
+  const sendEmails = req.query.sendEmails === "1";
+
+  const { rows, missing, unknown } = await readSheet(file, filename);
+  const checked = await checkRows(rows);
+  const summary = (r: (typeof checked)[number]) => ({ row: r.row, fullName: r.fullName, email: r.email, district: r.district, errors: r.errors });
+
+  if (dryRun) {
+    res.json({ rows: checked.map(summary), valid: checked.filter((r) => r.data).length, invalid: checked.filter((r) => !r.data).length, missingColumns: missing, unknownColumns: unknown });
+    return;
+  }
+
+  const created: { row: number; fullName: string; studentNo: string | null }[] = [];
+  const failed = checked.filter((r) => !r.data).map(summary);
+  const welcome: { email: string; fullName: string; studentNo: string | null; link: string | null }[] = [];
+  for (const r of checked) {
+    if (!r.data) continue;
+    try {
+      // One row at a time: a problem with one student doesn't stop the rest.
+      const { student, account } = await prisma.$transaction(async (tx) => {
+        const s = await createStudent(tx, r.data!, undefined, { source: "ADMIN", bulkImport: true });
+        return { student: s, account: await ensureAccount(tx, s.email) };
+      });
+      created.push({ row: r.row, fullName: student.fullName, studentNo: student.studentNo });
+      welcome.push({ email: student.email, fullName: student.fullName, studentNo: student.studentNo, link: welcomeLink(account) });
+    } catch (err) {
+      failed.push({ ...summary(r), errors: [err instanceof HttpError ? err.message : "Couldn't save this student"] });
+    }
+  }
+  failed.sort((a, b) => a.row - b.row);
+
+  // Emails go out after the response, one by one, so a large import doesn't time out.
+  if (sendEmails && welcome.length) {
+    void (async () => {
+      for (const w of welcome) {
+        await sendStudentRegistered(w.email, { fullName: w.fullName, studentNo: w.studentNo, setPasswordUrl: w.link }).catch((err) => console.error("Import welcome email failed:", err));
+      }
+    })();
+  }
+  res.json({ created: created.length, students: created, failed, emailsQueued: sendEmails ? welcome.length : 0 });
 });
 
 /** Students an admin adds are approved straight away and get a login by email. */

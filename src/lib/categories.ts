@@ -7,6 +7,9 @@ export interface AgeGroupDef {
   name: string;
   minAge: number;
   maxAge: number;
+  /** Younger players may "play up" into this group from this age (e.g. a 15-year-old cadet may also enter Junior
+   *  and Senior). Defaults to minAge: only the group's own ages. */
+  playUpFrom?: number;
   /** Upper limits in kg; the last class is "+<last limit>kg". */
   weights: { MALE: number[]; FEMALE: number[] };
 }
@@ -15,11 +18,17 @@ export const AGE_GROUPS: AgeGroupDef[] = [
   { name: "Mini Sub-Junior Age Group 1", minAge: 7, maxAge: 8, weights: { MALE: [20, 25, 30], FEMALE: [18, 22, 26] } },
   { name: "Mini Sub-Junior Age Group 2", minAge: 9, maxAge: 10, weights: { MALE: [25, 30, 35], FEMALE: [22, 26, 30] } },
   { name: "Mini Sub-Junior Age Group 3", minAge: 11, maxAge: 12, weights: { MALE: [30, 35, 40, 45], FEMALE: [28, 32, 36, 40] } },
-  { name: "Sub-Junior", minAge: 13, maxAge: 15, weights: { MALE: [30, 35, 40, 45, 50, 55, 60, 66], FEMALE: [28, 32, 36, 40, 44, 48, 52, 57] } },
-  { name: "Cadet", minAge: 16, maxAge: 18, weights: { MALE: [50, 55, 60, 66, 73, 81, 90], FEMALE: [40, 44, 48, 52, 57, 63, 70] } },
-  { name: "Junior", minAge: 16, maxAge: 21, weights: { MALE: [55, 60, 66, 73, 81, 90, 100], FEMALE: [44, 48, 52, 57, 63, 70, 78] } },
-  { name: "Senior", minAge: 16, maxAge: 120, weights: { MALE: [60, 66, 73, 81, 90, 100], FEMALE: [48, 52, 57, 63, 70, 78] } },
+  { name: "Sub-Junior", minAge: 13, maxAge: 14, weights: { MALE: [30, 35, 40, 45, 50, 55, 60, 66], FEMALE: [28, 32, 36, 40, 44, 48, 52, 57] } },
+  // Cadets (15–17) may enter Cadet, Junior and Senior; juniors (18–20) Junior and Senior; seniors (21+) Senior only.
+  { name: "Cadet", minAge: 15, maxAge: 17, weights: { MALE: [50, 55, 60, 66, 73, 81, 90], FEMALE: [40, 44, 48, 52, 57, 63, 70] } },
+  { name: "Junior", minAge: 18, maxAge: 20, playUpFrom: 15, weights: { MALE: [55, 60, 66, 73, 81, 90, 100], FEMALE: [44, 48, 52, 57, 63, 70, 78] } },
+  { name: "Senior", minAge: 21, maxAge: 120, playUpFrom: 15, weights: { MALE: [60, 66, 73, 81, 90, 100], FEMALE: [48, 52, 57, 63, 70, 78] } },
 ];
+
+/** True when a player of competition age `age` may enter `group` (its own ages, or playing up). */
+export function canEnter(group: AgeGroupDef, age: number): boolean {
+  return age >= (group.playUpFrom ?? group.minAge) && age <= group.maxAge;
+}
 
 export const AGE_GROUP_NAMES = AGE_GROUPS.map((g) => g.name);
 
@@ -36,7 +45,7 @@ export function competitionAge(dob: Date, tournamentDate: Date): number {
 /** Age groups (out of `allowed`) a student born on `dob` may enter for a tournament on `tournamentDate`. */
 export function eligibleAgeGroups(dob: Date, tournamentDate: Date, allowed: string[]): string[] {
   const age = competitionAge(dob, tournamentDate);
-  return AGE_GROUPS.filter((g) => allowed.includes(g.name) && age >= g.minAge && age <= g.maxAge).map((g) => g.name);
+  return AGE_GROUPS.filter((g) => allowed.includes(g.name) && canEnter(g, age)).map((g) => g.name);
 }
 
 export function weightClasses(ageGroup: string, gender: Gender): string[] {

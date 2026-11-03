@@ -4,7 +4,8 @@ import prisma from "../db.js";
 import { HttpError } from "../middleware/errors.js";
 import { PLACEMENTS, WIN_METHODS, type Placement } from "../lib/categories.js";
 import {
-  computePlacements, generateDraw, isRoundRobin, recordResult, resetResult, roundRobinStandings, type Entrant, type Rounds,
+  DRAW_FORMATS, REPECHAGE_MIN, computePlacements, generateDraw, isRepechageFormat, isRoundRobin, recordResult, redraw, resetResult, roundRobinStandings,
+  type DrawFormat, type Entrant, type Rounds,
 } from "../lib/bracket.js";
 import { categoryKey, findDraw, findTournament, mutateDraw, param, type LoadedDraw } from "../lib/helpers.js";
 
@@ -34,16 +35,28 @@ tournamentDrawsRouter.get("/categories", async (req, res) => {
   const tournamentId = param(req, "id");
   await findTournament(tournamentId);
   const [registrations, draws] = await Promise.all([
-    prisma.registration.findMany({ where: { tournamentId }, select: { id: true, ageGroup: true, gender: true, weightCategory: true, paymentStatus: true } }),
+    prisma.registration.findMany({ where: { tournamentId }, select: { id: true, ageGroup: true, gender: true, weightCategory: true, paymentStatus: true, weighInStatus: true } }),
     prisma.draw.findMany({ where: { tournamentId } }),
   ]);
 
-  const categories = new Map<string, { ageGroup: string; gender: string; weightCategory: string; regIds: string[]; paid: number }>();
+  type WeighIn = { cleared: number; pending: number; pendingPaid: number; disqualified: number };
+  type Category = { ageGroup: string; gender: string; weightCategory: string; regIds: string[]; paid: number; weighIn: WeighIn };
+  const categories = new Map<string, Category>();
   for (const r of registrations) {
     const key = categoryKey(r);
-    const c = categories.get(key) ?? { ageGroup: r.ageGroup, gender: r.gender, weightCategory: r.weightCategory, regIds: [], paid: 0 };
-    c.regIds.push(r.id);
-    if (r.paymentStatus !== "PENDING") c.paid++;
+    const c = categories.get(key) ?? { ageGroup: r.ageGroup, gender: r.gender, weightCategory: r.weightCategory, regIds: [], paid: 0, weighIn: { cleared: 0, pending: 0, pendingPaid: 0, disqualified: 0 } };
+    const paid = r.paymentStatus !== "PENDING";
+    if (r.weighInStatus === "DISQUALIFIED") {
+      c.weighIn.disqualified++; // disqualified players don't take part
+    } else {
+      c.regIds.push(r.id);
+      if (paid) c.paid++;
+      if (r.weighInStatus === "CLEARED") c.weighIn.cleared++;
+      else {
+        c.weighIn.pending++;
+        if (paid) c.weighIn.pendingPaid++;
+      }
+    }
     categories.set(key, c);
   }
 
@@ -54,6 +67,8 @@ tournamentDrawsRouter.get("/categories", async (req, res) => {
     return {
       ageGroup: c.ageGroup, gender: c.gender, weightCategory: c.weightCategory,
       entrants: c.regIds.length, paid: c.paid,
+      /** The draw waits until pending is 0 (pendingPaid when only paid entries are drawn) */
+      weighIn: c.weighIn,
       draw: draw && {
         id: draw.id, format: draw.format, isConcluded: draw.isConcluded, matNumber: draw.matNumber,
         matchesTotal: draw.matchesTotal, matchesDone: draw.matchesDone, complete: draw.complete,
@@ -68,13 +83,24 @@ tournamentDrawsRouter.get("/categories", async (req, res) => {
 
 // ─── Generate ────────────────────────────────────────────────────────────────
 
+/**
+ * A manual draw. Bracket formats: `slots` lists the first round's places in order (match 1 A, match 1 B,
+ * match 2 A, …), a registration id or null for a BYE. Round robin: `order` is the pool order.
+ */
+const manualSchema = z.object({
+  slots: z.array(z.string().nullable()).max(256).optional(),
+  order: z.array(z.string()).max(64).optional(),
+});
+
 const generateSchema = z.object({
   ageGroup: z.string().min(1),
   gender: z.enum(["MALE", "FEMALE"]),
   weightCategory: z.string().min(1),
-  format: z.enum(["AUTO", "ELIMINATION", "ROUND_ROBIN"]).default("AUTO"),
-  /** Up to four registration ids in seed order */
+  format: z.enum(["AUTO", ...DRAW_FORMATS]).default("AUTO"),
+  /** Up to four registration ids in seed order (automatic draws) */
   seedIds: z.array(z.string()).max(4).default([]),
+  /** Manual draw instead of an automatic one */
+  manual: manualSchema.optional(),
   /** Leave out entries whose fee is still pending */
   onlyPaid: z.boolean().default(false),
   matNumber: z.coerce.number().int().min(1).max(20).optional(),
@@ -82,7 +108,8 @@ const generateSchema = z.object({
   force: z.boolean().default(false),
 });
 
-async function buildDraw(tournamentId: string, numberOfMats: number, input: z.infer<typeof generateSchema>) {
+/** `fallback`: a repechage format on a category too small for it uses the automatic choice instead (Draw all). */
+async function buildDraw(tournamentId: string, numberOfMats: number, input: z.infer<typeof generateSchema> & { fallback?: boolean }) {
   const where = { tournamentId, ageGroup: input.ageGroup, gender: input.gender, weightCategory: input.weightCategory };
   const existing = await prisma.draw.findUnique({ where: { tournamentId_ageGroup_gender_weightCategory: where } });
   if (existing?.isConcluded) throw new HttpError(409, "This category is concluded. Reopen it before regenerating the draw.");
@@ -92,14 +119,24 @@ async function buildDraw(tournamentId: string, numberOfMats: number, input: z.in
   if (input.matNumber && input.matNumber > numberOfMats) throw new HttpError(400, `This tournament only has ${numberOfMats} mat(s).`);
 
   const registrations = await prisma.registration.findMany({
-    where: { ...where, ...(input.onlyPaid ? { paymentStatus: { in: ["PAID", "WAIVED"] } } : {}) },
+    where: { ...where, weighInStatus: { not: "DISQUALIFIED" }, ...(input.onlyPaid ? { paymentStatus: { in: ["PAID", "WAIVED"] } } : {}) },
     include: { student: true },
+    orderBy: { createdAt: "asc" },
   });
   if (!registrations.length) throw new HttpError(400, input.onlyPaid ? "No paid entries in this category yet." : "No students are registered in this category.");
+  // Weigh-in comes first: hold the draw while anyone who would be in it hasn't been weighed.
+  const notWeighed = registrations.filter((r) => r.weighInStatus !== "CLEARED");
+  if (notWeighed.length) {
+    const more = notWeighed.length > 5 ? ` and ${notWeighed.length - 5} more` : "";
+    const names = notWeighed.slice(0, 5).map((r) => r.student.fullName).join(", ") + more;
+    throw new HttpError(409, `Weigh-in pending for ${notWeighed.length} of ${registrations.length} players (${names}). Complete the weigh-in before generating this draw.`);
+  }
 
   const entrants: Entrant[] = registrations.map((r) => ({ id: r.id, name: r.student.fullName, club: r.student.club || r.student.district || "" }));
   const seeds = input.seedIds.map((id) => entrants.find((e) => e.id === id)).filter((e): e is Entrant => !!e);
-  const { format, rounds } = generateDraw(entrants, input.format, seeds);
+  const requested = input.fallback && input.format !== "AUTO" && isRepechageFormat(input.format) && entrants.length < REPECHAGE_MIN ? "AUTO" : input.format;
+  if (input.manual && requested === "AUTO") throw new HttpError(400, "Choose the draw format for a manual draw.");
+  const { format, rounds } = generateDraw(entrants, requested, input.manual ? [] : seeds, input.manual);
   const data = { format, entrants: entrants as object[], rounds: rounds as object[], matNumber: input.matNumber ?? existing?.matNumber ?? 1 };
 
   const draw = await prisma.draw.upsert({
@@ -132,7 +169,7 @@ tournamentDrawsRouter.post("/draws/generate-all", async (req, res) => {
     try {
       await buildDraw(tournament.id, tournament.numberOfMats, {
         ageGroup: c.ageGroup, gender: c.gender as "MALE" | "FEMALE", weightCategory: c.weightCategory,
-        format, onlyPaid, seedIds: [], force: false, matNumber: (i % tournament.numberOfMats) + 1,
+        format, onlyPaid, seedIds: [], force: false, matNumber: (i % tournament.numberOfMats) + 1, fallback: true,
       });
       created++;
     } catch (err) {
@@ -160,6 +197,16 @@ drawsRouter.put("/:drawId", async (req, res) => {
   const tournament = await findTournament(draw.tournamentId);
   const { matNumber } = z.object({ matNumber: z.coerce.number().int().min(1).max(tournament.numberOfMats) }).parse(req.body);
   await prisma.draw.update({ where: { id: draw.id }, data: { matNumber } });
+  res.json(describeDraw(await findDraw(draw.id)));
+});
+
+/** Change the pairings of an existing draw by hand (same format and players), until a match is played. */
+drawsRouter.put("/:drawId/pairings", async (req, res) => {
+  const draw = await findDraw(param(req, "drawId"));
+  if (draw.isConcluded) throw new HttpError(409, "This category is concluded. Reopen it before changing the draw.");
+  const manual = manualSchema.parse(req.body);
+  const rounds = redraw(draw.format as DrawFormat, draw.entrants, draw.rounds, manual);
+  await prisma.draw.update({ where: { id: draw.id }, data: { rounds: rounds as object[] } });
   res.json(describeDraw(await findDraw(draw.id)));
 });
 

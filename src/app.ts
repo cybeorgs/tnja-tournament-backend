@@ -7,6 +7,7 @@ import authRoutes from "./modules/auth.routes.js";
 import settingsRoutes from "./modules/settings.routes.js";
 import { refereesRouter, studentsRouter } from "./modules/people.routes.js";
 import tournamentRoutes from "./modules/tournaments.routes.js";
+import entryImportRoutes from "./modules/entryImport.routes.js";
 import { drawsRouter, tournamentDrawsRouter } from "./modules/draws.routes.js";
 import certificateRoutes from "./modules/certificates.routes.js";
 import publicRoutes from "./modules/public.routes.js";
@@ -37,6 +38,7 @@ export function createApp() {
   admin.use("/settings", settingsRoutes);
   admin.use("/students", studentsRouter);
   admin.use("/referees", refereesRouter);
+  admin.use("/tournaments/:id", entryImportRoutes); // before the tournament routes so "import" is never read as an id
   admin.use("/tournaments", tournamentRoutes);
   admin.use("/tournaments/:id", tournamentDrawsRouter);
   admin.use("/tournaments/:id", certificateRoutes);

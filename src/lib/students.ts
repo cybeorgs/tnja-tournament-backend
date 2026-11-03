@@ -142,9 +142,18 @@ export async function createStudent(
   tx: Tx,
   data: StudentData,
   emailVerificationToken: unknown,
-  { source = "ADMIN", documents = [] }: { source?: "ADMIN" | "SELF"; documents?: StudentUpload[] } = {},
+  {
+    source = "ADMIN",
+    documents = [],
+    bulkImport = false,
+  }: {
+    source?: "ADMIN" | "SELF";
+    documents?: StudentUpload[];
+    /** Admin bulk import from a spreadsheet: there is no one-time code per email to check */
+    bulkImport?: boolean;
+  } = {},
 ) {
-  assertEmailVerified(emailVerificationToken, data.email);
+  if (!(bulkImport && source === "ADMIN")) assertEmailVerified(emailVerificationToken, data.email);
   await assertAadhaarFree(tx, data.aadhaarNumber);
   const approved = source === "ADMIN" || !data.outsideTamilNadu;
   const student = await tx.student.create({

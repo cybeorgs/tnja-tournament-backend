@@ -12,6 +12,7 @@ import { ensureAccount } from "../lib/accounts.js";
 import { confirmEntriesLater, resendPaymentReceipt, sendEntryConfirmations, sendRemindersNow } from "../lib/notifications.js";
 import { confirmResidency, createStudent, studentSchema } from "../lib/students.js";
 import { closedReason, newEntryTerms, repriceUnpaid } from "../lib/fees.js";
+import { DATE, DATE_TIME, maskAadhaar, sendWorkbook, yearAge, type Column } from "../lib/excel.js";
 
 const router = Router();
 
@@ -192,15 +193,18 @@ const registrationSchema = z
     student: studentSchema.optional(),
     /** Proof the new student's email was verified (POST /public/email-otp/verify) */
     emailVerificationToken: z.string().optional(),
-    ageGroup: z.string().min(1, "Age group is required"),
+    ageGroup: z.string().min(1).optional(),
+    /** Enter several age groups at once (e.g. a cadet in Cadet, Junior and Senior): one entry each */
+    ageGroups: z.array(z.string().min(1)).max(8).optional(),
     weightKg: z.coerce.number().min(10, "Weight looks too low").max(250, "Weight looks too high"),
-    /** Leave empty to work it out from the weight */
+    /** Leave empty to work it out from the weight (only used when entering a single age group) */
     weightCategory: z.string().optional(),
     /** Skip the birth-year check for this age group */
     overrideAge: z.boolean().default(false),
     competeAs: competeAsSchema,
   })
-  .refine((r) => r.studentId || r.student, { message: "Pick a student or enter new student details", path: ["studentId"] });
+  .refine((r) => r.studentId || r.student, { message: "Pick a student or enter new student details", path: ["studentId"] })
+  .refine((r) => r.ageGroup || r.ageGroups?.length, { message: "Choose at least one age group", path: ["ageGroups"] });
 
 /** Draws that already contain this registration (it can't change category or be removed while drawn). */
 export async function drawsContaining(tournamentId: string, regId: string) {
@@ -227,6 +231,55 @@ export async function resolveCategory(
   return { ageGroup: input.ageGroup, gender, weightKg: input.weightKg, weightCategory };
 }
 
+/** Every entry in the tournament with the student's details, as an Excel sheet. Aadhaar numbers are masked. */
+router.get("/:id/registrations/export", async (req, res) => {
+  const tournament = await findTournament(param(req, "id"));
+  await repriceUnpaid(tournament);
+  const rows = await prisma.registration.findMany({
+    where: { tournamentId: tournament.id },
+    include: { student: true },
+    orderBy: [{ ageGroup: "asc" }, { gender: "asc" }, { weightCategory: "asc" }, { student: { fullName: "asc" } }],
+  });
+  type R = (typeof rows)[number];
+  const label = (v: string | null | undefined, map: Record<string, string>) => (v ? map[v] ?? v : "");
+  const columns: Column<R>[] = [
+    { header: "Student ID", width: 16, value: (r) => r.student.studentNo },
+    { header: "Full name", width: 26, value: (r) => r.student.fullName },
+    { header: "Gender", value: (r) => r.student.gender },
+    { header: "Date of birth", value: (r) => r.student.dob, format: DATE },
+    { header: "Age", value: (r) => yearAge(r.student.dob, tournament.startDate) },
+    { header: "Age group", width: 18, value: (r) => r.ageGroup },
+    { header: "Category", value: (r) => (r.gender === "MALE" ? "Boys" : "Girls") },
+    { header: "Weight class", value: (r) => r.weightCategory },
+    { header: "Weight entered (kg)", value: (r) => r.weightKg },
+    { header: "Weigh-in", value: (r) => label(r.weighInStatus, { PENDING: "Not weighed", CLEARED: "Cleared", DISQUALIFIED: "Disqualified" }) },
+    { header: "Scale weight (kg)", value: (r) => r.weighInKg },
+    { header: "Weighed at", value: (r) => r.weighedAt, format: DATE_TIME },
+    { header: "Club", width: 22, value: (r) => r.student.club },
+    { header: "Coach", width: 20, value: (r) => r.student.coachName },
+    { header: "Belt", value: (r) => r.student.belt },
+    { header: "District", width: 16, value: (r) => r.student.district },
+    { header: "State", width: 16, value: (r) => r.student.state },
+    { header: "Phone", width: 14, value: (r) => r.student.phone },
+    { header: "Email", width: 28, value: (r) => r.student.email },
+    { header: "Father's name", width: 22, value: (r) => r.student.fatherName },
+    { header: "Blood group", value: (r) => r.student.bloodGroup },
+    { header: "Aadhaar", width: 18, value: (r) => maskAadhaar(r.student.aadhaarNumber) },
+    { header: "Institution", width: 28, value: (r) => r.student.institutionName },
+    { header: "Registration", value: (r) => (r.isLate ? "Late" : "Regular") },
+    { header: "Fee (₹)", value: (r) => r.fee, format: "#,##0" },
+    { header: "Payment", value: (r) => label(r.paymentStatus, { PENDING: "Pending", PAID: "Paid", WAIVED: "Waived" }) },
+    { header: "Payment mode", value: (r) => r.paymentMode },
+    { header: "Amount paid (₹)", value: (r) => r.amountPaid, format: "#,##0" },
+    { header: "Paid at", value: (r) => r.paidAt, format: DATE_TIME },
+    { header: "Payment ID", width: 22, value: (r) => r.razorpayPaymentId },
+    { header: "Placement", value: (r) => label(r.placement, { FIRST: "1st", SECOND: "2nd", THIRD: "3rd", PARTICIPATION: "Participation" }) },
+    { header: "Certificate no.", width: 18, value: (r) => r.certificateNo },
+    { header: "Registered on", value: (r) => r.createdAt, format: DATE_TIME },
+  ];
+  await sendWorkbook(res, `${tournament.slug}_entries.xlsx`, "Entries", columns, rows);
+});
+
 router.get("/:id/registrations", async (req, res) => {
   const tournamentId = param(req, "id");
   await repriceUnpaid(await findTournament(tournamentId)); // amounts due are current
@@ -249,28 +302,38 @@ router.post("/:id/registrations", async (req, res) => {
   const student = input.studentId ? await prisma.student.findUnique({ where: { id: input.studentId } }) : newStudent;
   if (!student) throw notFound("Student");
   if ("status" in student && student.status !== "APPROVED") throw new HttpError(409, "This student's application hasn't been approved yet.");
-  if (input.studentId && (await prisma.registration.findUnique({ where: { tournamentId_studentId_ageGroup: { tournamentId: tournament.id, studentId: input.studentId, ageGroup: input.ageGroup } } }))) {
-    throw new HttpError(409, `This student is already entered in ${input.ageGroup}.`);
+  const ageGroups = [...new Set(input.ageGroups?.length ? input.ageGroups : [input.ageGroup!])];
+  if (input.studentId) {
+    const taken = await prisma.registration.findMany({ where: { tournamentId: tournament.id, studentId: input.studentId, ageGroup: { in: ageGroups } }, select: { ageGroup: true } });
+    if (taken.length) throw new HttpError(409, `This student is already entered in ${taken.map((r) => r.ageGroup).join(", ")}.`);
   }
 
-  const category = await resolveCategory(tournament, student, input);
-  const certificateNo = await newCertificateNo();
+  // A hand-picked weight class only makes sense for a single age group; otherwise each comes from the weight.
+  const categories = await Promise.all(ageGroups.map((ageGroup) =>
+    resolveCategory(tournament, student, { ...input, ageGroup, weightCategory: ageGroups.length === 1 ? input.weightCategory : undefined }),
+  ));
+  const certificateNos = await Promise.all(categories.map(() => newCertificateNo()));
 
-  const registration = await prisma.$transaction(async (tx) => {
+  // All or nothing: the student (if new) and every entry are created together.
+  const registrations = await prisma.$transaction(async (tx) => {
     let studentId = input.studentId;
     if (!studentId) {
       const created = await createStudent(tx, newStudent!, input.emailVerificationToken);
       await ensureAccount(tx, created.email);
       studentId = created.id;
     }
-    return tx.registration.create({
-      data: { tournamentId: tournament.id, studentId, ...category, ...terms, certificateNo },
-      include: { student: true },
-    });
+    const saved = [];
+    for (const [i, category] of categories.entries()) {
+      saved.push(await tx.registration.create({
+        data: { tournamentId: tournament.id, studentId, ...category, ...terms, certificateNo: certificateNos[i]! },
+        include: { student: true },
+      }));
+    }
+    return saved;
   });
   // One email: the registration confirmation, which also carries the username and set-password link of a new account.
-  confirmEntriesLater(tournament.id, registration.studentId);
-  res.status(201).json(registration);
+  confirmEntriesLater(tournament.id, registrations[0]!.studentId);
+  res.status(201).json(input.ageGroups ? registrations : registrations[0]);
 });
 
 const updateRegistrationSchema = z.object({
@@ -293,8 +356,56 @@ router.put("/:id/registrations/:regId", async (req, res) => {
   if (categoryChanged && (await drawsContaining(tournament.id, existing.id)).length) {
     throw new HttpError(409, "This student is already in a draw. Delete that category's draw before changing their category.");
   }
-  const registration = await prisma.registration.update({ where: { id: existing.id }, data: category, include: { student: true } });
+  // A weigh-in only holds for the category it was checked against.
+  const weighIn = categoryChanged && existing.weighInStatus !== "PENDING" ? { weighInStatus: "PENDING", weighInKg: null, weighedAt: null } : {};
+  const registration = await prisma.registration.update({ where: { id: existing.id }, data: { ...category, ...weighIn }, include: { student: true } });
   res.json(registration);
+});
+
+// ─── Weigh-in ────────────────────────────────────────────────────────────────
+// Every entrant is weighed before their category's draw is made (draws.routes refuses to draw a
+// category while anyone in it is still PENDING). The scale weight must fall in the registered weight
+// class; if it doesn't, the admin moves the player to the class the scale says, or disqualifies them.
+
+const weighInSchema = z.discriminatedUnion("action", [
+  /** Record the scale weight; it must be within the registered class */
+  z.object({ action: z.literal("RECORD"), weightKg: z.coerce.number().min(10, "Weight looks too low").max(250, "Weight looks too high") }),
+  /** Scale weight is in another class: move the player there (cleared) */
+  z.object({ action: z.literal("MOVE"), weightKg: z.coerce.number().min(10).max(250) }),
+  /** Leave the player out of the draw */
+  z.object({ action: z.literal("DISQUALIFY"), weightKg: z.coerce.number().min(10).max(250).optional() }),
+  /** Undo: back to not weighed */
+  z.object({ action: z.literal("RESET") }),
+]);
+
+router.patch("/:id/registrations/:regId/weigh-in", async (req, res) => {
+  const tournament = await findTournament(param(req, "id"));
+  const existing = await prisma.registration.findFirst({ where: { id: param(req, "regId"), tournamentId: tournament.id } });
+  if (!existing) throw notFound("Registration");
+  const input = weighInSchema.parse(req.body);
+  if ((await drawsContaining(tournament.id, existing.id)).length) {
+    throw new HttpError(409, "This player is already in a generated draw. Delete that category's draw before changing the weigh-in.");
+  }
+
+  const now = new Date();
+  let data: Record<string, unknown>;
+  if (input.action === "RESET") {
+    data = { weighInStatus: "PENDING", weighInKg: null, weighedAt: null };
+  } else if (input.action === "DISQUALIFY") {
+    data = { weighInStatus: "DISQUALIFIED", weighInKg: input.weightKg ?? existing.weighInKg, weighedAt: now };
+  } else {
+    const scaleClass = weightCategoryFor(input.weightKg, existing.ageGroup, existing.gender as Gender);
+    if (input.action === "RECORD") {
+      if (scaleClass !== existing.weightCategory) {
+        throw new HttpError(409, `${input.weightKg} kg is in the ${scaleClass} class, not ${existing.weightCategory}. Move the player to ${scaleClass} or disqualify them.`);
+      }
+      data = { weighInStatus: "CLEARED", weighInKg: input.weightKg, weighedAt: now };
+    } else {
+      // MOVE: the class the scale says (same age group and gender); the entry's weight becomes the scale weight.
+      data = { weighInStatus: "CLEARED", weighInKg: input.weightKg, weighedAt: now, weightKg: input.weightKg, weightCategory: scaleClass };
+    }
+  }
+  res.json(await prisma.registration.update({ where: { id: existing.id }, data, include: { student: true } }));
 });
 
 router.delete("/:id/registrations/:regId", async (req, res) => {
