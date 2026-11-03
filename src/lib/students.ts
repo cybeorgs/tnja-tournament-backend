@@ -3,7 +3,7 @@ import { z } from "zod";
 import prisma from "../db.js";
 import { HttpError } from "../middleware/errors.js";
 import { getSettings } from "./helpers.js";
-import { isKnownLocation } from "./locations.js";
+import { isKnownLocation, lookupPincode } from "./locations.js";
 import { assertEmailVerified } from "./emailOtp.js";
 
 type Tx = Prisma.TransactionClient;
@@ -26,10 +26,12 @@ export const BLOOD_GROUPS = ["O+ve", "O-ve", "A+ve", "A-ve", "B+ve", "B-ve", "AB
 
 export const studentSchema = z
   .object({
-    // Residing location
-    district: text("District", 80),
-    taluk: text("Taluk", 80),
+    // Residing location. Tamil Nadu residents pick a district and taluk from the list;
+    // everyone else types their district and needs admin approval (see createStudent).
     residingPincode: pincode("Residing pincode"),
+    outsideTamilNadu: z.boolean().default(false),
+    district: text("District", 80),
+    taluk: optional(80),
 
     // Personal information
     fullName: name("Full name"),
@@ -42,7 +44,7 @@ export const studentSchema = z
     aadhaarNumber: z.string().trim().regex(/^\d{12}$/, "Aadhaar number must be 12 digits"),
     phone: mobile,
     alternatePhone: z.union([z.literal(""), mobile]).default(""),
-    email: z.email("Enter a valid email address").max(254),
+    email: z.email("Enter a valid email address").max(254).transform((e) => e.trim().toLowerCase()),
     nationality: name("Nationality"),
 
     // Permanent address
@@ -53,6 +55,7 @@ export const studentSchema = z
 
     // Financial
     annualIncome: z.coerce.number({ error: "Annual income is required" }).int().min(0).max(1_000_000_000),
+    isBPL: z.boolean().default(false),
 
     // Education
     institutionType: z.enum(["SCHOOL", "COLLEGE", "DIPLOMA"], { error: "Choose the institution type" }),
@@ -64,17 +67,60 @@ export const studentSchema = z
     club: optional(),
     coachName: optional(),
     belt: optional(40),
-  })
-  .refine((s) => isKnownLocation(s.district, s.taluk), { message: "Choose a taluk from the selected district", path: ["taluk"] });
+  });
 
 export type StudentData = z.infer<typeof studentSchema>;
 
-/** One Aadhaar number, one student ID. */
-export async function assertAadhaarFree(tx: Tx | typeof prisma, aadhaarNumber: string, exceptId?: string) {
-  const other = await tx.student.findUnique({ where: { aadhaarNumber }, select: { id: true, studentNo: true } });
-  if (other && other.id !== exceptId) {
-    throw new HttpError(409, `This Aadhaar number is already registered (student ID ${other.studentNo}).`);
+/**
+ * Decide from the pincode itself whether the student lives in Tamil Nadu, rather than trusting
+ * the form (if the lookup service is down, the form's answer is kept). Tamil Nadu residents must
+ * pick a district and taluk from the list.
+ */
+export async function confirmResidency<T extends { residingPincode: string; outsideTamilNadu: boolean; isBPL: boolean; district: string; taluk: string }>(data: T): Promise<T> {
+  let outside = data.outsideTamilNadu;
+  try {
+    outside = !(await lookupPincode(data.residingPincode)).inTamilNadu;
+  } catch (err) {
+    if (err instanceof HttpError && err.status === 404) throw new HttpError(400, "The residing pincode wasn't found. Please check it.");
   }
+  if (!outside && !isKnownLocation(data.district, data.taluk)) {
+    throw new HttpError(400, "taluk: Choose a taluk from the selected district");
+  }
+  // BPL is a Tamil Nadu scheme.
+  return { ...data, outsideTamilNadu: outside, isBPL: outside ? false : data.isBPL };
+}
+
+/** One Aadhaar number, one student. */
+export async function assertAadhaarFree(tx: Tx | typeof prisma, aadhaarNumber: string, exceptId?: string) {
+  const other = await tx.student.findUnique({ where: { aadhaarNumber }, select: { id: true, studentNo: true, fullName: true } });
+  if (other && other.id !== exceptId) {
+    throw new HttpError(409, `This Aadhaar number is already registered (${other.studentNo ?? `${other.fullName}, awaiting approval`}).`);
+  }
+}
+
+// ─── Documents ───────────────────────────────────────────────────────────────
+
+export const DOCUMENT_KINDS = ["BPL_PROOF", "NATIVITY_PROOF"] as const;
+export type DocumentKind = (typeof DOCUMENT_KINDS)[number];
+export type StudentUpload = { kind: DocumentKind; label: string; mime: string; data: Uint8Array<ArrayBuffer> };
+
+const MIME_BY_PREFIX: Record<string, string> = {
+  "data:image/png;base64": "image/png",
+  "data:image/jpeg;base64": "image/jpeg",
+  "data:image/jpg;base64": "image/jpeg",
+  "data:image/webp;base64": "image/webp",
+  "data:application/pdf;base64": "application/pdf",
+};
+
+/** Decode an uploaded data: URL, checking its type and size. */
+export function decodeUpload(dataUrl: string, label: string, maxBytes = 1024 * 1024) {
+  const [header, base64] = dataUrl.split(",", 2);
+  const mime = MIME_BY_PREFIX[header ?? ""];
+  if (!mime) throw new HttpError(400, `${label} must be a JPG, PNG, WEBP or PDF file.`);
+  const data = Uint8Array.from(Buffer.from(base64 || "", "base64"));
+  if (data.length === 0) throw new HttpError(400, `${label} is empty.`);
+  if (data.length > maxBytes) throw new HttpError(400, `${label} must be smaller than ${Math.round(maxBytes / 1024 / 1024)} MB.`);
+  return { mime, data };
 }
 
 // ─── Permanent student ID ────────────────────────────────────────────────────
@@ -87,9 +133,34 @@ async function nextStudentNo(tx: Tx): Promise<string> {
   return `${prefix}-S-${String(row!.n).padStart(6, "0")}`;
 }
 
-/** Create a student with a freshly issued permanent ID. The email must have been verified by OTP. */
-export async function createStudent(tx: Tx, data: StudentData, emailVerificationToken: unknown, source: "ADMIN" | "SELF" = "ADMIN") {
+/**
+ * Create a student. The email must have been verified by OTP.
+ * Students added by an admin, and Tamil Nadu residents, get their permanent ID straight away;
+ * anyone else registering themselves waits (PENDING) until an admin approves their documents.
+ */
+export async function createStudent(
+  tx: Tx,
+  data: StudentData,
+  emailVerificationToken: unknown,
+  { source = "ADMIN", documents = [] }: { source?: "ADMIN" | "SELF"; documents?: StudentUpload[] } = {},
+) {
   assertEmailVerified(emailVerificationToken, data.email);
   await assertAadhaarFree(tx, data.aadhaarNumber);
-  return tx.student.create({ data: { ...data, source, studentNo: await nextStudentNo(tx) } });
+  const approved = source === "ADMIN" || !data.outsideTamilNadu;
+  const student = await tx.student.create({
+    data: { ...data, source, status: approved ? "APPROVED" : "PENDING", studentNo: approved ? await nextStudentNo(tx) : null },
+  });
+  for (const doc of documents) await tx.studentDocument.create({ data: { studentId: student.id, ...doc } });
+  return student;
+}
+
+/** Approve a pending application, issuing the permanent ID. */
+export async function approveStudent(tx: Tx, id: string) {
+  const student = await tx.student.findUnique({ where: { id } });
+  if (!student) throw new HttpError(404, "Student not found.");
+  if (student.status === "APPROVED") return student;
+  return tx.student.update({
+    where: { id },
+    data: { status: "APPROVED", studentNo: student.studentNo ?? (await nextStudentNo(tx)), reviewNote: "", reviewedAt: new Date() },
+  });
 }

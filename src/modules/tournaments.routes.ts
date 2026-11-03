@@ -7,8 +7,11 @@ import {
 } from "../lib/categories.js";
 import type { Entrant } from "../lib/bracket.js";
 import { categoryKey, findTournament, newCertificateNo, param, slugify } from "../lib/helpers.js";
-import { confirmEntryPayment, createEntryOrder, verifySchema } from "../lib/payments.js";
-import { createStudent, studentSchema } from "../lib/students.js";
+import { confirmOrderPayment, createEntryOrder, verifySchema } from "../lib/payments.js";
+import { ensureAccount } from "../lib/accounts.js";
+import { confirmEntriesLater, resendPaymentReceipt, sendEntryConfirmations, sendRemindersNow } from "../lib/notifications.js";
+import { confirmResidency, createStudent, studentSchema } from "../lib/students.js";
+import { closedReason, newEntryTerms, repriceUnpaid } from "../lib/fees.js";
 
 const router = Router();
 
@@ -20,16 +23,34 @@ const tournamentSchema = z
     description: z.string().trim().max(5000).default(""),
     venue: z.string().trim().min(2, "Venue is required").max(200),
     city: z.string().trim().max(80).default(""),
-    startDate: z.coerce.date({ error: "Start date is required" }),
+    /** Date and time the tournament starts; registration closes at this moment */
+    startDate: z.coerce.date({ error: "Start date and time are required" }),
     endDate: z.coerce.date().nullable().optional(),
+    registrationOpensAt: z.coerce.date({ error: "Registration opening date and time are required" }),
+    /** End of regular registration; late registration (at the late entry fee) runs from here until the start */
+    registrationClosesAt: z.coerce.date({ error: "Regular registration closing date and time are required" }),
+    /** When to email the deadline reminder to players with unpaid entries; null = don't send one */
+    reminderAt: z.coerce.date().nullable().default(null),
     level: z.enum(TOURNAMENT_LEVELS),
     gender: z.enum(["MALE", "FEMALE", "BOTH"]),
     ageGroups: z.array(z.enum(AGE_GROUP_NAMES as [string, ...string[]])).min(1, "Pick at least one age group"),
+    /** Regular entry fee */
     entryFee: z.coerce.number().int().min(0).max(100000).default(0),
-    numberOfMats: z.coerce.number().int().min(1).max(20).default(1),
-    registrationOpen: z.boolean().default(true),
+    /** Late entry fee, set by the admin; not lower than the regular fee */
+    lateEntryFee: z.coerce.number({ error: "Enter the late entry fee" }).int().min(0).max(100000),
+    // Set on the tournament page (Officials tab), not the create/edit form. Left out, a new
+    // tournament gets 1 mat and an edit keeps the current count.
+    numberOfMats: z.coerce.number().int().min(1).max(20).optional(),
   })
-  .refine((t) => !t.endDate || t.endDate >= t.startDate, { message: "End date cannot be before the start date", path: ["endDate"] });
+  // The end date is a date only, so compare whole days (the start has a time of day).
+  .refine((t) => !t.endDate || t.endDate.getTime() > t.startDate.getTime() - 24 * 60 * 60 * 1000, { message: "End date cannot be before the start date", path: ["endDate"] })
+  .refine((t) => t.registrationOpensAt < t.registrationClosesAt, { message: "Regular registration must close after it opens", path: ["registrationClosesAt"] })
+  .refine((t) => t.registrationClosesAt <= t.startDate, { message: "Regular registration must close before the tournament starts", path: ["registrationClosesAt"] })
+  .refine((t) => t.lateEntryFee >= t.entryFee, { message: "The late entry fee can't be lower than the regular entry fee", path: ["lateEntryFee"] })
+  .refine((t) => !t.reminderAt || (t.reminderAt > t.registrationOpensAt && t.reminderAt < t.registrationClosesAt), {
+    message: "The reminder must be sent after registration opens and before regular registration closes",
+    path: ["reminderAt"],
+  });
 
 router.get("/", async (_req, res) => {
   const tournaments = await prisma.tournament.findMany({
@@ -43,24 +64,48 @@ router.get("/", async (_req, res) => {
 
 router.post("/", async (req, res) => {
   const data = tournamentSchema.parse(req.body);
-  const tournament = await prisma.tournament.create({ data: { ...data, endDate: data.endDate ?? null, slug: slugify(data.title) } });
+  // A new tournament is live on the public site straight away; there is no draft stage.
+  const tournament = await prisma.tournament.create({
+    data: { ...data, endDate: data.endDate ?? null, slug: slugify(data.title), status: "PUBLISHED", publishedAt: new Date() },
+  });
   res.status(201).json(tournament);
 });
 
 router.get("/:id", async (req, res) => {
   const tournament = await findTournament(param(req, "id"));
+  await repriceUnpaid(tournament); // so amounts due are current
   const [registrations, referees, draws] = await Promise.all([
-    prisma.registration.findMany({ where: { tournamentId: tournament.id }, select: { ageGroup: true, gender: true, weightCategory: true, paymentStatus: true, amountPaid: true } }),
+    prisma.registration.findMany({
+      where: { tournamentId: tournament.id },
+      select: { studentId: true, ageGroup: true, gender: true, weightCategory: true, paymentStatus: true, amountPaid: true, fee: true, isLate: true },
+    }),
     prisma.tournamentReferee.count({ where: { tournamentId: tournament.id } }),
     prisma.draw.findMany({ where: { tournamentId: tournament.id }, select: { isConcluded: true } }),
   ]);
   const categories = new Set(registrations.map(categoryKey));
+  const sum = (rows: typeof registrations, pick: (r: (typeof registrations)[number]) => number) => rows.reduce((total, r) => total + pick(r), 0);
+  const paidEntries = registrations.filter((r) => r.paymentStatus === "PAID");
+  const pendingEntries = registrations.filter((r) => r.paymentStatus === "PENDING");
+  const players = new Set(registrations.map((r) => r.studentId));
+  const playersOwing = new Set(pendingEntries.map((r) => r.studentId));
   res.json({
     ...tournament,
     stats: {
       registrations: registrations.length,
-      paid: registrations.filter((r) => r.paymentStatus === "PAID").length,
-      collected: registrations.reduce((sum, r) => sum + r.amountPaid, 0),
+      paid: paidEntries.length,
+      collected: sum(paidEntries, (r) => r.amountPaid),
+      // Players (a player may enter several age groups)
+      players: players.size,
+      /** Players with every entry settled (paid or free) */
+      paidPlayers: [...players].filter((id) => !playersOwing.has(id)).length,
+      playersOwing: playersOwing.size,
+      // Entries
+      pendingPayments: pendingEntries.length,
+      pendingAmount: sum(pendingEntries, (r) => r.fee),
+      regularEntries: registrations.filter((r) => !r.isLate).length,
+      lateEntries: registrations.filter((r) => r.isLate).length,
+      regularRevenue: sum(paidEntries.filter((r) => !r.isLate), (r) => r.amountPaid),
+      lateRevenue: sum(paidEntries.filter((r) => r.isLate), (r) => r.amountPaid),
       referees,
       categories: categories.size,
       draws: draws.length,
@@ -82,7 +127,24 @@ router.put("/:id", async (req, res) => {
     if (clash) throw new HttpError(409, `Students are registered in ${removedGroups.join(", ")}. Remove them before dropping that age group.`);
   }
   const tournament = await prisma.tournament.update({ where: { id: existing.id }, data: { ...data, endDate: data.endDate ?? null } });
+  // Unpaid entries follow the fee policy (current period's fee); paid entries keep what they paid.
+  await repriceUnpaid(tournament);
   res.json(tournament);
+});
+
+/** Change the number of mats. Can't drop a mat that a referee or a draw is still assigned to. */
+router.patch("/:id/mats", async (req, res) => {
+  const existing = await findTournament(param(req, "id"));
+  const { numberOfMats } = z.object({ numberOfMats: z.coerce.number().int().min(1, "At least 1 mat").max(20, "At most 20 mats") }).parse(req.body);
+  if (numberOfMats < existing.numberOfMats) {
+    const onDropped = { tournamentId: existing.id, matNumber: { gt: numberOfMats } };
+    const [officials, draws] = await Promise.all([prisma.tournamentReferee.count({ where: onDropped }), prisma.draw.count({ where: onDropped })]);
+    if (officials || draws) {
+      const what = [officials && `${officials} referee(s)`, draws && `${draws} draw(s)`].filter(Boolean).join(" and ");
+      throw new HttpError(409, `${what} are on mat ${numberOfMats + 1} or higher. Move them to another mat first.`);
+    }
+  }
+  res.json(await prisma.tournament.update({ where: { id: existing.id }, data: { numberOfMats } }));
 });
 
 router.delete("/:id", async (req, res) => {
@@ -91,22 +153,17 @@ router.delete("/:id", async (req, res) => {
   res.json({ message: "Tournament deleted." });
 });
 
-const statusSchema = z.object({ action: z.enum(["publish", "unpublish", "complete", "reopen", "publishResults", "hideResults"]) });
+const statusSchema = z.object({ action: z.enum(["complete", "reopen", "publishResults", "hideResults"]) });
 
-/** Publishing workflow. Nothing here needs anyone else's approval. */
+/** Tournaments are published when created; this completes/reopens them and shows or hides results. */
 router.post("/:id/status", async (req, res) => {
   const tournament = await findTournament(param(req, "id"));
   const { action } = statusSchema.parse(req.body);
   let data: Record<string, unknown> = {};
   switch (action) {
-    case "publish":
-      data = { status: "PUBLISHED", publishedAt: tournament.publishedAt ?? new Date() };
-      break;
-    case "unpublish":
-      data = { status: "DRAFT", resultsPublished: false };
-      break;
     case "complete":
-      data = { status: "COMPLETED", publishedAt: tournament.publishedAt ?? new Date(), registrationOpen: false };
+      // A completed tournament takes no entries or payments (see registrationPhase).
+      data = { status: "COMPLETED", publishedAt: tournament.publishedAt ?? new Date() };
       break;
     case "reopen":
       data = { status: "PUBLISHED" };
@@ -114,7 +171,7 @@ router.post("/:id/status", async (req, res) => {
     case "publishResults": {
       const concluded = await prisma.draw.count({ where: { tournamentId: tournament.id, isConcluded: true } });
       if (!concluded) throw new HttpError(400, "Conclude at least one category before publishing results.");
-      data = { resultsPublished: true, status: tournament.status === "DRAFT" ? "PUBLISHED" : tournament.status, publishedAt: tournament.publishedAt ?? new Date() };
+      data = { resultsPublished: true, publishedAt: tournament.publishedAt ?? new Date() };
       break;
     }
     case "hideResults":
@@ -146,7 +203,7 @@ const registrationSchema = z
   .refine((r) => r.studentId || r.student, { message: "Pick a student or enter new student details", path: ["studentId"] });
 
 /** Draws that already contain this registration (it can't change category or be removed while drawn). */
-async function drawsContaining(tournamentId: string, regId: string) {
+export async function drawsContaining(tournamentId: string, regId: string) {
   const draws = await prisma.draw.findMany({ where: { tournamentId }, select: { id: true, entrants: true, ageGroup: true, weightCategory: true } });
   return draws.filter((d) => (d.entrants as unknown as Entrant[]).some((e) => e.id === regId));
 }
@@ -172,7 +229,7 @@ export async function resolveCategory(
 
 router.get("/:id/registrations", async (req, res) => {
   const tournamentId = param(req, "id");
-  await findTournament(tournamentId);
+  await repriceUnpaid(await findTournament(tournamentId)); // amounts due are current
   const registrations = await prisma.registration.findMany({
     where: { tournamentId },
     include: { student: true },
@@ -183,24 +240,36 @@ router.get("/:id/registrations", async (req, res) => {
 
 router.post("/:id/registrations", async (req, res) => {
   const tournament = await findTournament(param(req, "id"));
-  if (!tournament.registrationOpen) throw new HttpError(409, "Registration is closed for this tournament. Reopen it from the Overview tab first.");
+  // Admin entries follow the same schedule: regular fee, then the late fee, none after the start.
+  const terms = newEntryTerms(tournament);
+  if (!terms) throw new HttpError(409, `${closedReason(tournament)} To change this, edit the registration dates.`);
   const input = registrationSchema.parse(req.body);
 
-  const student = input.studentId
-    ? await prisma.student.findUnique({ where: { id: input.studentId } })
-    : input.student!;
+  const newStudent = input.student ? await confirmResidency(input.student) : null;
+  const student = input.studentId ? await prisma.student.findUnique({ where: { id: input.studentId } }) : newStudent;
   if (!student) throw notFound("Student");
+  if ("status" in student && student.status !== "APPROVED") throw new HttpError(409, "This student's application hasn't been approved yet.");
+  if (input.studentId && (await prisma.registration.findUnique({ where: { tournamentId_studentId_ageGroup: { tournamentId: tournament.id, studentId: input.studentId, ageGroup: input.ageGroup } } }))) {
+    throw new HttpError(409, `This student is already entered in ${input.ageGroup}.`);
+  }
 
   const category = await resolveCategory(tournament, student, input);
   const certificateNo = await newCertificateNo();
 
   const registration = await prisma.$transaction(async (tx) => {
-    const studentId = input.studentId ?? (await createStudent(tx, input.student!, input.emailVerificationToken)).id;
+    let studentId = input.studentId;
+    if (!studentId) {
+      const created = await createStudent(tx, newStudent!, input.emailVerificationToken);
+      await ensureAccount(tx, created.email);
+      studentId = created.id;
+    }
     return tx.registration.create({
-      data: { tournamentId: tournament.id, studentId, ...category, certificateNo, paymentStatus: tournament.entryFee > 0 ? "PENDING" : "WAIVED" },
+      data: { tournamentId: tournament.id, studentId, ...category, ...terms, certificateNo },
       include: { student: true },
     });
   });
+  // One email: the registration confirmation, which also carries the username and set-password link of a new account.
+  confirmEntriesLater(tournament.id, registration.studentId);
   res.status(201).json(registration);
 });
 
@@ -250,14 +319,17 @@ async function findRegistration(tournamentId: string, regId: string) {
 
 router.post("/:id/registrations/:regId/payment/order", async (req, res) => {
   const registration = await findRegistration(param(req, "id"), param(req, "regId"));
-  if (registration.tournament.entryFee <= 0) throw new HttpError(400, "This tournament has no entry fee.");
+  if (registration.fee <= 0) throw new HttpError(400, "This entry has no fee to pay.");
   if (registration.paymentStatus === "PAID") throw new HttpError(409, "This entry is already paid.");
-  res.json(await createEntryOrder(registration, registration.tournament));
+  const order = await createEntryOrder([registration], registration.tournament);
+  if (!order) throw new HttpError(409, "This entry has already been paid (an earlier online payment went through). Refresh the list.");
+  res.json(order);
 });
 
 router.post("/:id/registrations/:regId/payment/verify", async (req, res) => {
   const registration = await findRegistration(param(req, "id"), param(req, "regId"));
-  res.json(await confirmEntryPayment(registration, registration.tournament.entryFee, verifySchema.parse(req.body)));
+  const paid = await confirmOrderPayment(registration.tournamentId, verifySchema.parse(req.body));
+  res.json(paid.find((r) => r.id === registration.id) ?? paid[0]);
 });
 
 const manualPaymentSchema = z.object({
@@ -274,11 +346,39 @@ router.patch("/:id/registrations/:regId/payment", async (req, res) => {
   const updated = await prisma.registration.update({
     where: { id: registration.id },
     data: status === "PAID"
-      ? { paymentStatus: "PAID", paymentMode: mode ?? "CASH", amountPaid: registration.tournament.entryFee, paidAt: new Date() }
+      ? { paymentStatus: "PAID", paymentMode: mode ?? "CASH", amountPaid: registration.fee, paidAt: new Date() }
       : { paymentStatus: status, paymentMode: null, amountPaid: 0, paidAt: null },
     include: { student: true },
   });
   res.json(updated);
+});
+
+// ─── Emails ──────────────────────────────────────────────────────────────────
+// The three tournament emails: delivery log, and sending one on purpose (e.g. after fixing an email
+// address). Automatic sends never repeat; a send from here is a deliberate one.
+
+router.get("/:id/emails", async (req, res) => {
+  const tournamentId = param(req, "id");
+  await findTournament(tournamentId);
+  const logs = await prisma.emailLog.findMany({ where: { tournamentId }, orderBy: { createdAt: "desc" }, take: 300 });
+  const students = await prisma.student.findMany({ where: { id: { in: [...new Set(logs.map((l) => l.studentId).filter((id): id is string => !!id))] } }, select: { id: true, fullName: true } });
+  const names = new Map(students.map((s) => [s.id, s.fullName]));
+  res.json(logs.map((l) => ({ ...l, studentName: l.studentId ? names.get(l.studentId) ?? null : null })));
+});
+
+const sendEmailSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("CONFIRMATION"), studentId: z.string().uuid() }),
+  z.object({ kind: z.literal("REMINDER"), studentId: z.string().uuid().optional() }),
+  z.object({ kind: z.literal("PAYMENT"), studentId: z.string().uuid() }),
+]);
+
+/** Send one of the three emails now. A reminder without a player goes to everyone unpaid who hasn't had one. */
+router.post("/:id/emails", async (req, res) => {
+  const tournament = await findTournament(param(req, "id"));
+  const input = sendEmailSchema.parse(req.body);
+  if (input.kind === "REMINDER") return res.json({ sent: await sendRemindersNow(tournament.id, input.studentId) });
+  const delivery = input.kind === "CONFIRMATION" ? await sendEntryConfirmations(tournament.id, input.studentId, "MANUAL") : await resendPaymentReceipt(tournament.id, input.studentId);
+  res.json({ sent: delivery ? 1 : 0, status: delivery?.status ?? null, error: delivery?.error ?? "" });
 });
 
 // ─── Referees / officials ────────────────────────────────────────────────────

@@ -11,6 +11,8 @@ import { drawsRouter, tournamentDrawsRouter } from "./modules/draws.routes.js";
 import certificateRoutes from "./modules/certificates.routes.js";
 import publicRoutes from "./modules/public.routes.js";
 import selfServiceRoutes from "./modules/selfService.routes.js";
+import aadhaarRoutes from "./modules/aadhaar.routes.js";
+import { studentAuthRouter, studentRouter } from "./modules/studentAuth.routes.js";
 
 export function createApp() {
   const app = express();
@@ -25,6 +27,9 @@ export function createApp() {
   app.use("/api/auth", authRoutes);
   app.use("/api/public", publicRoutes);
   app.use("/api/public", selfServiceRoutes);
+  app.use("/api/public", aadhaarRoutes);
+  app.use("/api/student-auth", studentAuthRouter);
+  app.use("/api/student", studentRouter);
 
   // Everything below needs a logged-in admin.
   const admin = express.Router();

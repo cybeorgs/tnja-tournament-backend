@@ -10,6 +10,7 @@ import { categoryLabel } from "../lib/certificate.js";
 import type { Entrant, Rounds } from "../lib/bracket.js";
 import { getSettings, param } from "../lib/helpers.js";
 import { publicView } from "./settings.routes.js";
+import { isSandboxConfigured } from "../lib/sandbox.js";
 import { describeDraw } from "./draws.routes.js";
 import { loadRegistrations, officialCertificatesPdf, sendPdf, studentCertificatesPdf } from "./certificates.js";
 
@@ -17,7 +18,8 @@ const router = Router();
 const VISIBLE = { status: { in: ["PUBLISHED", "COMPLETED"] } };
 
 router.get("/settings", async (_req, res) => {
-  res.json(publicView(await getSettings()));
+  // aadhaarVerification: whether self-registration asks for DigiLocker verification.
+  res.json({ ...publicView(await getSettings()), aadhaarVerification: isSandboxConfigured() });
 });
 
 router.get("/logo", async (_req, res) => {
@@ -45,7 +47,7 @@ router.get("/meta", (_req, res) => {
 
 const publicTournamentFields = {
   id: true, slug: true, title: true, description: true, venue: true, city: true, startDate: true, endDate: true,
-  level: true, gender: true, ageGroups: true, entryFee: true, numberOfMats: true, registrationOpen: true, status: true, resultsPublished: true, publishedAt: true,
+  level: true, gender: true, ageGroups: true, entryFee: true, registrationOpensAt: true, registrationClosesAt: true, numberOfMats: true, status: true, resultsPublished: true, publishedAt: true,
 } as const;
 
 router.get("/tournaments", async (_req, res) => {

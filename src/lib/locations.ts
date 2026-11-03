@@ -54,22 +54,33 @@ async function fetchPostOffices(pincode: string): Promise<PostOffice[]> {
   return offices;
 }
 
+/** Result of a pincode lookup: a Tamil Nadu district and its candidate taluks, or the state elsewhere. */
+export type PincodeLocation =
+  | { pincode: string; inTamilNadu: true; state: "Tamil Nadu"; district: string; taluks: string[]; postOffices: string[] }
+  | { pincode: string; inTamilNadu: false; state: string; district: string; taluks: []; postOffices: string[] };
+
 /**
- * District and taluk(s) for a Tamil Nadu pincode.
+ * Where a pincode is. For Tamil Nadu: the district and taluk(s).
  * India Post's District field still uses pre-2019/2020 boundaries, while its Block field
  * matches current taluk names, so taluks are matched first and the district follows from them.
  */
-export async function lookupPincode(pincode: string) {
+export async function lookupPincode(pincode: string): Promise<PincodeLocation> {
   if (!/^[1-9]\d{5}$/.test(pincode)) throw new HttpError(400, "Pincode must be 6 digits.");
 
-  let offices: PostOffice[];
+  let all: PostOffice[];
   try {
-    offices = (await fetchPostOffices(pincode)).filter((o) => nameKey(o.State) === "tamilnadu");
+    all = await fetchPostOffices(pincode);
   } catch (err) {
     console.error("Pincode lookup failed:", err);
-    throw new HttpError(502, "Couldn't look up this pincode. Pick the district and taluk below.");
+    throw new HttpError(502, "Couldn't look up this pincode right now. Please try again.");
   }
-  if (!offices.length) throw new HttpError(404, "Pincode not found in Tamil Nadu. Pick the district and taluk below.");
+  if (!all.length) throw new HttpError(404, "This pincode wasn't found. Please check it.");
+
+  const offices = all.filter((o) => nameKey(o.State) === "tamilnadu");
+  if (!offices.length) {
+    const first = all[0]!;
+    return { pincode, inTamilNadu: false, state: first.State, district: first.District, taluks: [], postOffices: all.map((o) => o.Name) };
+  }
 
   const blockKeys = new Set(offices.map((o) => nameKey(o.Block)));
   const matched = TN_LOCATIONS.flatMap((d) => d.taluks.filter((t) => blockKeys.has(nameKey(t))).map((taluk) => ({ taluk, district: d.district })));
@@ -91,5 +102,5 @@ export async function lookupPincode(pincode: string) {
   if (!district) throw new HttpError(404, "Pincode not recognised. Pick the district and taluk below.");
 
   const taluks = [...new Set(matched.filter((m) => m.district === district).map((m) => m.taluk))].sort();
-  return { pincode, district, taluks, postOffices: offices.map((o) => o.Name) };
+  return { pincode, inTamilNadu: true, state: "Tamil Nadu", district, taluks, postOffices: offices.map((o) => o.Name) };
 }

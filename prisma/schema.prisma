@@ -40,19 +40,28 @@ model Tournament {
   description      String    @default("")
   venue            String
   city             String    @default("")
+  /// Date and time the tournament starts. Registration (and paying for it) closes at this moment.
   startDate        DateTime
   endDate          DateTime?
+  /// Registration opens at this moment, at the regular entry fee
+  registrationOpensAt  DateTime
+  /// Regular registration ends here; late registration (2 × entry fee) runs from here until startDate
+  registrationClosesAt DateTime
+  /// When to email the deadline reminder to players with unpaid entries (before registrationClosesAt); null = no reminder
+  reminderAt       DateTime?
   /// DISTRICT | STATE | ZONAL | NATIONAL | OPEN
   level            String    @default("STATE")
   /// MALE | FEMALE | BOTH
   gender           String    @default("BOTH")
   /// Age groups contested, e.g. ["Sub-Junior", "Cadet"]
   ageGroups        String[]
+  /// Regular entry fee (registrationOpensAt → registrationClosesAt)
   entryFee         Int       @default(0)
+  /// Late entry fee set by the admin, higher than entryFee (registrationClosesAt → startDate)
+  lateEntryFee     Int       @default(0)
   numberOfMats     Int       @default(1)
-  registrationOpen Boolean   @default(true)
-  /// DRAFT (only admins see it) | PUBLISHED (public page live) | COMPLETED
-  status           String    @default("DRAFT")
+  /// PUBLISHED (public page live; set on creation) | COMPLETED
+  status           String    @default("PUBLISHED")
   publishedAt      DateTime?
   /// When true the public page shows placements and certificates can be downloaded publicly.
   resultsPublished Boolean   @default(false)
@@ -62,14 +71,22 @@ model Tournament {
   registrations Registration[]
   referees      TournamentReferee[]
   draws         Draw[]
+  emails        EmailLog[]
 }
 
 /// Master list of athletes, reusable across tournaments.
 model Student {
   id               String   @id @default(uuid())
-  /// Permanent student ID issued the moment the student is created, e.g. TNJA-S-000123.
-  /// Students quote it to enter tournaments. It never changes.
-  studentNo        String   @unique
+  /// Permanent student ID, e.g. TNJA-S-000123. Issued straight away for Tamil Nadu residents and
+  /// on admin approval for everyone else (null until then). It never changes.
+  studentNo        String?  @unique
+  /// APPROVED | PENDING (outside Tamil Nadu, waiting for the admin to check their documents) | REJECTED
+  status           String   @default("APPROVED")
+  /// Residing pincode is outside Tamil Nadu: they upload proof (e.g. a nativity certificate) and need approval
+  outsideTamilNadu Boolean  @default(false)
+  /// Admin's note when rejecting an application
+  reviewNote       String   @default("")
+  reviewedAt       DateTime?
   fullName         String
   fatherName       String   @default("")
   motherName       String   @default("")
@@ -88,6 +105,7 @@ model Student {
   /// 12 digits; unique so one person can't hold two student IDs
   aadhaarNumber    String?  @unique
   alternatePhone   String   @default("")
+  /// Lower-case. Students sharing an email (e.g. siblings) share one StudentAccount login.
   email            String   @default("")
   nationality      String   @default("")
   address          String   @default("")
@@ -95,6 +113,8 @@ model Student {
   state            String   @default("")
   pincode          String   @default("")
   annualIncome     Int?
+  /// Below poverty line; Tamil Nadu residents upload proof when registering themselves
+  isBPL            Boolean  @default(false)
   /// SCHOOL | COLLEGE | DIPLOMA
   institutionType  String   @default("")
   institutionName  String   @default("")
@@ -108,6 +128,39 @@ model Student {
   updatedAt        DateTime @updatedAt
 
   registrations Registration[]
+  documents     StudentDocument[]
+
+  @@index([email])
+  @@index([status])
+}
+
+/// Files uploaded with a registration: BPL proof, or proof of nativity for applicants outside Tamil Nadu.
+model StudentDocument {
+  id        String   @id @default(uuid())
+  studentId String
+  /// BPL_PROOF | NATIVITY_PROOF
+  kind      String
+  /// What the applicant says the file is, e.g. "Nativity certificate"
+  label     String   @default("")
+  mime      String
+  data      Bytes
+  createdAt DateTime @default(now())
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, kind])
+}
+
+/// Login for students (and parents): one per email, covering every student registered with it.
+model StudentAccount {
+  id           String   @id @default(uuid())
+  /// Lower-case
+  email        String   @unique
+  passwordHash String
+  /// When the owner chose a password; null while only the emailed set-password link can be used
+  passwordSetAt DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }
 
 model Registration {
@@ -125,20 +178,34 @@ model Registration {
   certificateNo     String?   @unique
   /// PENDING | PAID | WAIVED
   paymentStatus     String    @default("PENDING")
+  /// Entered during late registration (registration type: Late; otherwise Regular)
+  isLate            Boolean   @default(false)
+  /// Amount due while unpaid: the fee of the current period (entry fee, or the late entry fee once the
+  /// regular deadline has passed). Kept up to date for unpaid entries; frozen once paid.
+  fee               Int       @default(0)
   /// RAZORPAY | CASH | UPI | OTHER
   paymentMode       String?
+  /// Actual amount received (for online payments, as verified with the payment gateway)
   amountPaid        Int       @default(0)
   razorpayOrderId   String?
+  /// The amount this entry was charged in its current payment order, checked against the gateway on verification
+  orderFee          Int?
   razorpayPaymentId String?
   paidAt            DateTime?
+  /// Registration confirmation email sent (so it goes out once per entry)
+  confirmationSentAt DateTime?
+  /// Deadline reminder email sent (so it goes out once per entry)
+  reminderSentAt     DateTime?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
   tournament Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
   student    Student    @relation(fields: [studentId], references: [id], onDelete: Restrict)
 
-  @@unique([tournamentId, studentId])
+  /// A student may enter several age groups (e.g. a cadet in Cadet, Junior and Senior), one entry each.
+  @@unique([tournamentId, studentId, ageGroup])
   @@index([tournamentId, ageGroup, gender, weightCategory])
+  @@index([razorpayOrderId])
 }
 
 /// Master list of referees and technical officials.
@@ -195,4 +262,26 @@ model Draw {
   tournament Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
 
   @@unique([tournamentId, ageGroup, gender, weightCategory])
+}
+
+/// Every automated or admin-triggered tournament email, with its delivery status.
+model EmailLog {
+  id           String   @id @default(uuid())
+  tournamentId String
+  studentId    String?
+  /// CONFIRMATION | REMINDER | PAYMENT
+  kind         String
+  /// AUTO (sent by the system) | MANUAL (sent by an admin)
+  trigger      String   @default("AUTO")
+  toEmail      String
+  subject      String
+  /// SENT | FAILED | NOT_CONFIGURED (no SMTP: logged to the server console instead)
+  status       String
+  error        String   @default("")
+  createdAt    DateTime @default(now())
+
+  tournament Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+
+  @@index([tournamentId, createdAt])
+  @@index([tournamentId, studentId])
 }

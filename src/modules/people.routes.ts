@@ -2,10 +2,12 @@
 import { Router } from "express";
 import { z } from "zod";
 import prisma from "../db.js";
-import { notFound } from "../middleware/errors.js";
+import { HttpError, notFound } from "../middleware/errors.js";
 import { param } from "../lib/helpers.js";
-import { assertAadhaarFree, createStudent, studentSchema } from "../lib/students.js";
+import { DOCUMENT_KINDS, approveStudent, assertAadhaarFree, confirmResidency, createStudent, studentSchema } from "../lib/students.js";
 import { assertEmailVerified } from "../lib/emailOtp.js";
+import { ensureAccount, welcomeLink } from "../lib/accounts.js";
+import { sendStudentApproved, sendStudentRegistered, sendStudentRejected } from "../lib/mailer.js";
 
 const listQuery = z.object({
   q: z.string().trim().optional(),
@@ -19,22 +21,32 @@ export const studentsRouter = Router();
 
 studentsRouter.get("/", async (req, res) => {
   const { q, page, pageSize } = listQuery.parse(req.query);
-  const where = q
-    ? { OR: [{ fullName: { contains: q, mode: "insensitive" as const } }, { studentNo: { contains: q, mode: "insensitive" as const } }, { club: { contains: q, mode: "insensitive" as const } }, { phone: { contains: q } }] }
-    : {};
-  const [items, total] = await Promise.all([
+  const status = z.enum(["APPROVED", "PENDING", "REJECTED"]).optional().parse(req.query.status || undefined);
+  const where = {
+    ...(status ? { status } : {}),
+    ...(q
+      ? { OR: [{ fullName: { contains: q, mode: "insensitive" as const } }, { studentNo: { contains: q, mode: "insensitive" as const } }, { club: { contains: q, mode: "insensitive" as const } }, { phone: { contains: q } }, { email: { contains: q.toLowerCase() } }] }
+      : {}),
+  };
+  const [items, total, pending] = await Promise.all([
     prisma.student.findMany({
-      where, orderBy: { fullName: "asc" }, skip: (page - 1) * pageSize, take: pageSize,
+      where, orderBy: status === "PENDING" ? { createdAt: "asc" } : { fullName: "asc" }, skip: (page - 1) * pageSize, take: pageSize,
       include: { _count: { select: { registrations: true } } },
     }),
     prisma.student.count({ where }),
+    prisma.student.count({ where: { status: "PENDING" } }),
   ]);
-  res.json({ items, total, page, pageSize });
+  res.json({ items, total, page, pageSize, pending });
 });
 
+/** Students an admin adds are approved straight away and get a login by email. */
 studentsRouter.post("/", async (req, res) => {
-  const data = studentSchema.parse(req.body);
-  const student = await prisma.$transaction((tx) => createStudent(tx, data, req.body?.emailVerificationToken));
+  const data = await confirmResidency(studentSchema.parse(req.body));
+  const { student, account } = await prisma.$transaction(async (tx) => {
+    const created = await createStudent(tx, data, req.body?.emailVerificationToken);
+    return { student: created, account: await ensureAccount(tx, created.email) };
+  });
+  await sendStudentRegistered(student.email, { fullName: student.fullName, studentNo: student.studentNo, setPasswordUrl: welcomeLink(account) });
   res.status(201).json(student);
 });
 
@@ -43,20 +55,54 @@ studentsRouter.get("/:id", async (req, res) => {
     where: { id: param(req, "id") },
     include: {
       registrations: { include: { tournament: { select: { id: true, title: true, startDate: true } } }, orderBy: { createdAt: "desc" } },
+      documents: { select: { kind: true, label: true, mime: true } },
     },
   });
   if (!student) throw notFound("Student");
   res.json(student);
 });
 
+/** BPL proof or proof of nativity uploaded with the registration. */
+studentsRouter.get("/:id/documents/:kind", async (req, res) => {
+  const kind = z.enum(DOCUMENT_KINDS).parse(param(req, "kind"));
+  const doc = await prisma.studentDocument.findUnique({ where: { studentId_kind: { studentId: param(req, "id"), kind } } });
+  if (!doc) throw notFound("Document");
+  res.setHeader("Content-Type", doc.mime);
+  res.setHeader("Cache-Control", "private, max-age=300");
+  res.end(Buffer.from(doc.data));
+});
+
 studentsRouter.put("/:id", async (req, res) => {
   const id = param(req, "id");
-  const data = studentSchema.parse(req.body);
+  const data = await confirmResidency(studentSchema.parse(req.body));
   const existing = await prisma.student.findUnique({ where: { id }, select: { email: true } });
   if (!existing) throw notFound("Student");
-  if (existing.email.toLowerCase() !== data.email.toLowerCase()) assertEmailVerified(req.body?.emailVerificationToken, data.email);
+  const emailChanged = existing.email.toLowerCase() !== data.email;
+  if (emailChanged) assertEmailVerified(req.body?.emailVerificationToken, data.email);
   await assertAadhaarFree(prisma, data.aadhaarNumber, id);
-  const student = await prisma.student.update({ where: { id }, data });
+  const { student, account } = await prisma.$transaction(async (tx) => ({
+    student: await tx.student.update({ where: { id }, data }),
+    account: emailChanged ? await ensureAccount(tx, data.email) : null,
+  }));
+  // A new email that didn't have a login yet gets the welcome email with its set-password link.
+  if (account?.created) await sendStudentRegistered(student.email, { fullName: student.fullName, studentNo: student.studentNo, setPasswordUrl: welcomeLink(account) });
+  res.json(student);
+});
+
+/** Approve an application from outside Tamil Nadu: issues the permanent ID and emails it. */
+studentsRouter.post("/:id/approve", async (req, res) => {
+  const student = await prisma.$transaction((tx) => approveStudent(tx, param(req, "id")));
+  await sendStudentApproved(student.email, { fullName: student.fullName, studentNo: student.studentNo! });
+  res.json(student);
+});
+
+studentsRouter.post("/:id/reject", async (req, res) => {
+  const { reason } = z.object({ reason: z.string().trim().min(3, "Tell the applicant why").max(500) }).parse(req.body);
+  const existing = await prisma.student.findUnique({ where: { id: param(req, "id") } });
+  if (!existing) throw notFound("Student");
+  if (existing.status === "APPROVED") throw new HttpError(409, "This student is already approved.");
+  const student = await prisma.student.update({ where: { id: existing.id }, data: { status: "REJECTED", reviewNote: reason, reviewedAt: new Date() } });
+  await sendStudentRejected(student.email, { fullName: student.fullName, reason });
   res.json(student);
 });
 
