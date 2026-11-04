@@ -216,8 +216,7 @@ model Registration {
   confirmationSentAt DateTime?
   /// Deadline reminder email sent (so it goes out once per entry)
   reminderSentAt     DateTime?
-  /// Hall ticket emailed with this entry on it. Once all of a student's entries in a tournament are
-  /// paid (or free), a hall ticket is emailed if any of them hasn't been on one yet.
+  /// Tournament Entry Pass for this event emailed (the column keeps its earlier "hall ticket" name)
   hallTicketSentAt   DateTime?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
@@ -293,7 +292,7 @@ model EmailLog {
   id           String   @id @default(uuid())
   tournamentId String
   studentId    String?
-  /// CONFIRMATION | REMINDER | PAYMENT | HALL_TICKET
+  /// CONFIRMATION | REMINDER | PAYMENT | HALL_TICKET (older) | ENTRY_PASS
   kind         String
   /// AUTO (sent by the system) | MANUAL (sent by an admin)
   trigger      String   @default("AUTO")

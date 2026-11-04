@@ -20,7 +20,7 @@ import { assertEmailVerified, checkEmailOtp, createEmailOtp, createEmailVerified
 import { sendEmailOtp } from "../lib/mailer.js";
 import { assertAadhaarVerified } from "../lib/aadhaar.js";
 import { closedReason, newEntryTerms, repriceEntries } from "../lib/fees.js";
-import { hallTicketPdf, hallTicketReady, loadHallTicket, sendHallTicketLater } from "../lib/hallTicket.js";
+import { entryPassPdf, entryPassReady, loadEntryPass, sendEntryPassesLater } from "../lib/entryPass.js";
 import { confirmPayment, createOrder, createPayToken, readPayToken, verifySchema } from "../lib/payments.js";
 import { sendPdf } from "./certificates.js";
 import { competeAsSchema, resolveCategory } from "./tournaments.routes.js";
@@ -118,8 +118,8 @@ router.post("/students/register", registerLimiter, async (req, res) => {
   // Sent before replying, so the screen can tell the player whether it went (a background send could be
   // lost, e.g. if the server restarts, with nobody knowing).
   const loginEmail = await emailRegistrationNow(student);
-  // Free tournament: the hall ticket goes out now. Otherwise it is emailed once the entries are paid.
-  if (entered.length && tournament) sendHallTicketLater(tournament.id, student.id);
+  // Free events get their Tournament Entry Pass now; the others once paid.
+  if (entered.length && tournament) sendEntryPassesLater(tournament.id, student.id);
   res.status(201).json({
     status: student.status, studentNo: student.studentNo, tempId: student.studentNo ? null : tempIdOf(student), fullName: student.fullName, email: student.email, newAccount: account.created,
     /** Whether the username/password email was sent: SENT, FAILED, or NOT_CONFIGURED (no SMTP; written to the server log) */
@@ -251,7 +251,7 @@ router.post("/tournaments/:slug/entry", entryLimiter, async (req, res) => {
     await repriceEntries(tx, tournament.id, student.id);
   });
 
-  sendHallTicketLater(tournament.id, student.id);
+  sendEntryPassesLater(tournament.id, student.id);
   res.json({ entries: (await studentEntries(tournament.id, student.id)).map(entryView), payToken: createPayToken(tournament.id, student.id) });
 });
 
@@ -272,13 +272,13 @@ router.post("/payments/verify", payLimiter, async (req, res) => {
   res.json({ entries: entries.map(entryView) });
 });
 
-/** The hall ticket, once paid, for the screen the student paid on. */
-router.post("/payments/hall-ticket", payLimiter, async (req, res) => {
+/** One event's Tournament Entry Pass, once paid, for the screen the student paid on. */
+router.post("/payments/entry-pass", payLimiter, async (req, res) => {
   const { tournamentId, studentId } = readPayToken(req.body?.payToken);
-  const data = await loadHallTicket(tournamentId, studentId);
-  if (!data) throw notFound("Entry");
-  if (!hallTicketReady(data.entries)) throw new HttpError(409, "The hall ticket is issued once every entry is paid.");
-  const pdf = await hallTicketPdf(data);
+  const data = await loadEntryPass(String(req.body?.registrationId ?? ""));
+  if (!data || data.tournament.id !== tournamentId || data.student.id !== studentId) throw notFound("Entry");
+  if (!entryPassReady(data.entry)) throw new HttpError(409, "The entry pass is issued once this event is paid.");
+  const pdf = await entryPassPdf(data);
   sendPdf(res, pdf.content, pdf.filename, true);
 });
 

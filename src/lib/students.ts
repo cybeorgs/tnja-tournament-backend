@@ -70,7 +70,7 @@ export const studentSchema = z
     coachName: optional(),
     belt: optional(40),
 
-    // Additional details (printed on the hall ticket). Weight is required when students register themselves.
+    // Additional details (printed on the Tournament Entry Pass). Weight is required when students register themselves.
     weightKg: z.union([z.literal("").transform(() => null), z.coerce.number().min(10, "Weight looks too low").max(250, "Weight looks too high")]).nullable().default(null),
     managerName: optional(),
     districtPresident: optional(),

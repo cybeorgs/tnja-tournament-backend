@@ -1,7 +1,7 @@
 // ─── Online entry-fee payments (Razorpay) ────────────────────────────────────
 // A student pays all their unpaid entries in a tournament in one go: right after registering (the
 // registration reply carries a short-lived pay token), or later from their student login. Either way
-// the same steps run, and paying the last unpaid entry emails the hall ticket.
+// the same steps run, and each event paid for gets its Tournament Entry Pass by email.
 //
 // Safeguards:
 //   • The amount is worked out on the server from the entries' fees and locked into the order (orderFee).
@@ -16,7 +16,7 @@ import { z } from "zod";
 import prisma from "../db.js";
 import { env } from "../config/env.js";
 import { HttpError } from "../middleware/errors.js";
-import { sendHallTicketLater } from "./hallTicket.js";
+import { sendEntryPassesLater } from "./entryPass.js";
 import { repriceEntries } from "./fees.js";
 
 export const onlinePaymentEnabled = () => !!env.razorpayKeyId && !!env.razorpayKeySecret;
@@ -97,7 +97,7 @@ async function recordPayment(tournamentId: string, studentId: string, orderId: s
       }),
     ),
   );
-  sendHallTicketLater(tournamentId, studentId);
+  sendEntryPassesLater(tournamentId, studentId);
 }
 
 /** Record any earlier order of these entries that Razorpay says was paid (so nobody pays twice). */

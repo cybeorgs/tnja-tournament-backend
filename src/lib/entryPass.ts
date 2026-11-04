@@ -1,18 +1,20 @@
-// ─── Hall tickets ────────────────────────────────────────────────────────────
-// One A4 page per student per tournament, listing every event (age group) they entered. It is
-// issued once all of those entries are paid, or straight away for a free tournament, and emailed
-// as a PDF. It can be downloaded again any time from the student's account (and by an admin).
-// When the student enters another event later and pays for it, an updated hall ticket is emailed.
+// ─── Tournament Entry Passes ─────────────────────────────────────────────────
+// One A4 page per EVENT: a player entering three age groups gets three passes. A pass is issued as
+// soon as that event is paid (straight away when it is free) and emailed as a PDF; when several events
+// become ready together, one email carries all their passes. Passes can be downloaded again any time
+// from the student's account (and by an admin).
 //
-// The page has the logo, short name, organisation name and registration number (Settings.regNo,
-// "329-2017"), the passport photo, the registration details, the additional details (weight, coach,
-// manager, district president and secretary) and blank space to be filled in by hand at the venue:
-// the weigh-in, remarks and signatures.
+// Each page has the logo, short name, organisation name and registration number (Settings.regNo,
+// "329-2017"), the passport photo, the player's registration details, the event, the additional
+// details (weight, coach, manager, district president and secretary) and blank space to be filled in
+// by hand at the venue: the weigh-in, remarks and signatures.
+//
+// Registration.hallTicketSentAt records that the event's pass was emailed (the column keeps its old name).
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFImage, type PDFPage } from "pdf-lib";
 import type { Registration, Student, Tournament } from "@prisma/client";
 import prisma from "../db.js";
 import { getSettings } from "./helpers.js";
-import { sendHallTicket, type Attachment } from "./mailer.js";
+import { sendEntryPasses, type Attachment } from "./mailer.js";
 
 const INK = rgb(0.06, 0.09, 0.16);
 const MUTED = rgb(0.39, 0.45, 0.55);
@@ -21,13 +23,14 @@ const SOFT = rgb(1, 0.96, 0.92);
 const BRAND = rgb(1, 0.455, 0); // #FF7400
 const WHITE = rgb(1, 1, 1);
 
+export const ENTRY_PASS = "Tournament Entry Pass";
+
 // The standard PDF fonts only cover Latin-1; drop anything else rather than crash.
 const safe = (text: string) => text.replace(/[^\x20-\x7E\xA0-\xFF]/g, "").trim();
 const IST = "Asia/Kolkata";
 const day = (d: Date) => d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric", timeZone: IST });
 const dateTime = (d: Date) => d.toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit", timeZone: IST });
 const GENDER: Record<string, string> = { MALE: "Male", FEMALE: "Female", OTHER: "Other" };
-const PAYMENT: Record<string, string> = { PAID: "Paid", WAIVED: "Free", PENDING: "Unpaid" };
 
 function fit(text: string, font: PDFFont, size: number, maxWidth: number) {
   const full = safe(text);
@@ -38,32 +41,31 @@ function fit(text: string, font: PDFFont, size: number, maxWidth: number) {
 }
 
 type Entry = Pick<Registration, "id" | "ageGroup" | "gender" | "weightCategory" | "weightKg" | "fee" | "paymentStatus" | "amountPaid" | "paidAt" | "paymentMode" | "hallTicketSentAt" | "createdAt">;
-export type HallTicketData = { tournament: Tournament; student: Student; entries: Entry[]; photo: { mime: string; data: Uint8Array } | null };
+export type EntryPassData = { tournament: Tournament; student: Student; entry: Entry; photo: { mime: string; data: Uint8Array } | null };
 
-/** Stable number printed on the ticket: from the student's first entry in the tournament. */
-export const hallTicketNo = (entries: Entry[]) => `HT-${entries[0]!.id.replace(/-/g, "").slice(0, 10).toUpperCase()}`;
+/** Stable number printed on the pass, from the event's entry. */
+export const entryPassNo = (entry: Pick<Entry, "id">) => `TEP-${entry.id.replace(/-/g, "").slice(0, 10).toUpperCase()}`;
 
-/** Ready once the student has entries and none of them is waiting for payment. */
-export const hallTicketReady = (entries: Pick<Entry, "paymentStatus">[]) => entries.length > 0 && entries.every((e) => e.paymentStatus !== "PENDING");
+/** An event's pass is issued once it is paid, or straight away when it is free. */
+export const entryPassReady = (entry: Pick<Entry, "paymentStatus">) => entry.paymentStatus !== "PENDING";
 
-/** Everything printed on the ticket, or null when the student has no entry in the tournament. */
-export async function loadHallTicket(tournamentId: string, studentId: string): Promise<HallTicketData | null> {
-  const [tournament, student, entries, photo] = await Promise.all([
-    prisma.tournament.findUnique({ where: { id: tournamentId } }),
-    prisma.student.findUnique({ where: { id: studentId } }),
-    prisma.registration.findMany({ where: { tournamentId, studentId }, orderBy: { createdAt: "asc" } }),
-    prisma.studentDocument.findUnique({ where: { studentId_kind: { studentId, kind: "PHOTO" } }, select: { mime: true, data: true } }),
-  ]);
-  if (!tournament || !student || !entries.length) return null;
-  return { tournament, student, entries, photo };
+const loadPhoto = (studentId: string) =>
+  prisma.studentDocument.findUnique({ where: { studentId_kind: { studentId, kind: "PHOTO" } }, select: { mime: true, data: true } });
+
+/** Everything printed on one event's pass, or null when the entry doesn't exist. */
+export async function loadEntryPass(registrationId: string): Promise<EntryPassData | null> {
+  const entry = await prisma.registration.findUnique({ where: { id: registrationId }, include: { tournament: true, student: true } });
+  if (!entry) return null;
+  const { tournament, student, ...rest } = entry;
+  return { tournament, student, entry: rest, photo: await loadPhoto(student.id) };
 }
 
-export async function hallTicketPdf({ tournament: t, student: s, entries, photo }: HallTicketData): Promise<Attachment> {
+export async function entryPassPdf({ tournament: t, student: s, entry: e, photo }: EntryPassData): Promise<Attachment> {
   const settings = await getSettings();
-  const ticketNo = hallTicketNo(entries);
+  const passNo = entryPassNo(e);
   const regNo = settings.regNo.trim();
   const pdf = await PDFDocument.create();
-  pdf.setTitle(`Hall ticket - ${s.fullName} - ${t.title}`);
+  pdf.setTitle(`${ENTRY_PASS} - ${s.fullName} - ${e.ageGroup} ${e.weightCategory} - ${t.title}`);
   pdf.setAuthor(`${settings.orgShortName}${regNo ? ` (Reg. No. ${regNo})` : ""}`);
   const page = pdf.addPage([595.28, 841.89]); // A4 portrait
   const { width, height } = page.getSize();
@@ -74,11 +76,12 @@ export async function hallTicketPdf({ tournament: t, student: s, entries, photo 
   const inner = right - left;
 
   const text = (p: PDFPage, value: string, x: number, y: number, size: number, font = sans, color = INK) => p.drawText(safe(value), { x, y, size, font, color });
+  const centred = (value: string, cx: number, y: number, size: number, font: PDFFont, color = INK) => text(page, value, cx - font.widthOfTextAtSize(safe(value), size) / 2, y, size, font, color);
   const embed = async (mime: string, data: Uint8Array): Promise<PDFImage | null> => {
     try {
       return mime.includes("png") ? await pdf.embedPng(data) : await pdf.embedJpg(data);
     } catch (err) {
-      console.error("[hall ticket] Could not embed an image:", err);
+      console.error("[entry pass] Could not embed an image:", err);
       return null;
     }
   };
@@ -86,7 +89,7 @@ export async function hallTicketPdf({ tournament: t, student: s, entries, photo 
   // Page border, for a clean printed edge
   page.drawRectangle({ x: 18, y: 18, width: width - 36, height: height - 36, borderColor: BRAND, borderWidth: 1.2 });
 
-  // ── Header: logo, TNJA, organisation, registration number, HALL TICKET ──
+  // ── Header: logo, TNJA, organisation, registration number, TOURNAMENT ENTRY PASS ──
   const headerTop = height - 30;
   const headerH = 92;
   page.drawRectangle({ x: left, y: headerTop - headerH, width: inner, height: headerH, color: BRAND });
@@ -102,19 +105,19 @@ export async function hallTicketPdf({ tournament: t, student: s, entries, photo 
     page.drawImage(logo, { x: cx - (logo.width * scale) / 2, y: cy - (logo.height * scale) / 2, width: logo.width * scale, height: logo.height * scale });
     textX = left + 102;
   }
-  const badgeW = 128;
+  const badgeW = 150;
   const textW = right - badgeW - 14 - textX;
   text(page, fit(settings.orgShortName.toUpperCase(), bold, 26, textW), textX, headerTop - 34, 26, bold, WHITE);
   text(page, fit(settings.orgName, bold, 11, textW), textX, headerTop - 52, 11, bold, WHITE);
   const sub = [regNo && `Reg. No. ${regNo}`, settings.tagline].filter(Boolean).join("  |  ");
   if (sub) text(page, fit(sub, sans, 8.5, textW), textX, headerTop - 67, 8.5, sans, rgb(1, 0.93, 0.86));
-  // "HALL TICKET" badge
+  // Badge: TOURNAMENT / ENTRY PASS, with the pass number underneath
   const badgeX = right - badgeW - 14;
-  page.drawRectangle({ x: badgeX, y: headerTop - 64, width: badgeW, height: 36, color: WHITE });
-  const title = "HALL TICKET";
-  text(page, title, badgeX + (badgeW - bold.widthOfTextAtSize(title, 15)) / 2, headerTop - 51, 15, bold, BRAND);
-  const no = fit(ticketNo, bold, 8, badgeW);
-  text(page, no, badgeX + (badgeW - bold.widthOfTextAtSize(no, 8)) / 2, headerTop - 78, 8, bold, WHITE);
+  const badgeCx = badgeX + badgeW / 2;
+  page.drawRectangle({ x: badgeX, y: headerTop - 66, width: badgeW, height: 46, color: WHITE });
+  centred("TOURNAMENT", badgeCx, headerTop - 35, 9, bold, BRAND);
+  centred("ENTRY PASS", badgeCx, headerTop - 56, 17, bold, BRAND);
+  centred(fit(passNo, bold, 8, badgeW), badgeCx, headerTop - 80, 8, bold, WHITE);
 
   // ── Tournament ──
   let y = headerTop - headerH - 10;
@@ -137,8 +140,7 @@ export async function hallTicketPdf({ tournament: t, student: s, entries, photo 
     const h = image.height * scale;
     page.drawImage(image, { x: photoX + (photoW - w) / 2, y: photoTop - photoH + (photoH - h) / 2, width: w, height: h });
   } else {
-    const hint = ["Affix recent", "passport-size", "photograph", "(blue / white", "background)"];
-    hint.forEach((line, i) => text(page, line, photoX + (photoW - sans.widthOfTextAtSize(line, 8)) / 2, photoTop - 42 - i * 11, 8, sans, MUTED));
+    ["Affix recent", "passport-size", "photograph", "(blue / white", "background)"].forEach((line, i) => centred(line, photoX + photoW / 2, photoTop - 42 - i * 11, 8, sans, MUTED));
   }
   page.drawRectangle({ x: photoX, y: photoTop - photoH, width: photoW, height: photoH, borderColor: INK, borderWidth: 0.8 });
 
@@ -166,34 +168,28 @@ export async function hallTicketPdf({ tournament: t, student: s, entries, photo 
   }
   y = Math.min(dy + 4, photoTop - photoH) - 16;
 
-  // ── Events entered ──
+  // ── The event this pass is for ──
   const section = (label: string) => {
     text(page, label.toUpperCase(), left, y, 9, bold, BRAND);
     page.drawLine({ start: { x: left, y: y - 5 }, end: { x: right, y: y - 5 }, thickness: 0.8, color: BRAND });
     y -= 20;
   };
-  section("Events entered");
-  const cols = [
-    { label: "#", w: 22 }, { label: "Age group", w: 150 }, { label: "Section", w: 62 }, { label: "Weight class", w: 88 },
-    { label: "Weight entered", w: 84 }, { label: "Entry fee", w: inner - 22 - 150 - 62 - 88 - 84 },
+  section("Event");
+  const fee = e.paymentStatus === "WAIVED" || !e.fee ? "Free" : `Rs. ${(e.paymentStatus === "PAID" ? e.amountPaid || e.fee : e.fee).toLocaleString("en-IN")} ${e.paymentStatus === "PAID" ? "Paid" : "Unpaid"}`;
+  const eventCells: [string, string][] = [
+    ["Age group", e.ageGroup], ["Section", e.gender === "FEMALE" ? "Girls" : "Boys"], ["Weight class", e.weightCategory],
+    ["Weight entered", `${e.weightKg} kg`], ["Entry fee", fee],
   ];
-  const row = (cells: string[], font: PDFFont, color = INK, shade = false) => {
-    if (shade) page.drawRectangle({ x: left, y: y - 5, width: inner, height: 17, color: rgb(0.96, 0.97, 0.98) });
-    let x = left + 4;
-    cells.forEach((c, i) => {
-      text(page, fit(c, font, 9, cols[i]!.w - 8), x, y, 9, font, color);
-      x += cols[i]!.w;
-    });
-    y -= 17;
-  };
-  row(cols.map((c) => c.label), bold, MUTED, true);
-  const shown = entries.slice(0, 8);
-  shown.forEach((e, i) => {
-    const fee = e.paymentStatus === "WAIVED" || !e.fee ? "Free" : `Rs. ${(e.paymentStatus === "PAID" ? e.amountPaid || e.fee : e.fee).toLocaleString("en-IN")} ${PAYMENT[e.paymentStatus] ?? ""}`;
-    row([String(i + 1), e.ageGroup, e.gender === "FEMALE" ? "Girls" : "Boys", e.weightCategory, `${e.weightKg} kg`, fee], sans);
+  const boxH = 40;
+  page.drawRectangle({ x: left, y: y - boxH + 12, width: inner, height: boxH, color: SOFT, borderColor: rgb(1, 0.82, 0.66), borderWidth: 0.8 });
+  const widths = [0.3, 0.13, 0.17, 0.18, 0.22].map((f) => f * inner);
+  let ex = left + 10;
+  eventCells.forEach(([label, value], i) => {
+    text(page, label.toUpperCase(), ex, y, 7, bold, MUTED);
+    text(page, fit(value, bold, i === 0 || i === 2 ? 12 : 10.5, widths[i]! - 14), ex, y - 16, i === 0 || i === 2 ? 12 : 10.5, bold, i === 2 ? BRAND : INK);
+    ex += widths[i]!;
   });
-  if (entries.length > shown.length) row(["", `+ ${entries.length - shown.length} more (see your account)`, "", "", "", ""], sans, MUTED);
-  y -= 8;
+  y -= boxH + 8;
 
   // ── Additional details (blank lines where nothing was given, to fill in by hand) ──
   section("Additional details");
@@ -204,8 +200,7 @@ export async function hallTicketPdf({ tournament: t, student: s, entries, photo 
   ];
   const halfW = (inner - 16) / 2;
   for (let i = 0; i < extra.length; i += 2) {
-    const pair = extra.slice(i, i + 2);
-    for (const [j, [label, value]] of pair.entries()) {
+    for (const [j, [label, value]] of extra.slice(i, i + 2).entries()) {
       const x = left + j * (halfW + 16);
       text(page, `${label}:`, x, y, 9, bold, MUTED);
       const lx = x + bold.widthOfTextAtSize(`${label}:`, 9) + 6;
@@ -236,25 +231,25 @@ export async function hallTicketPdf({ tournament: t, student: s, entries, photo 
 
   // ── Signatures ──
   const signers = ["Player", "Coach / Manager", "District Secretary (seal)", "Weigh-in Official"];
-  const boxW = (inner - 12 * (signers.length - 1)) / signers.length;
-  const boxH = 46;
+  const signW = (inner - 12 * (signers.length - 1)) / signers.length;
+  const signH = 46;
   signers.forEach((label, i) => {
-    const x = left + i * (boxW + 12);
-    page.drawRectangle({ x, y: y - boxH, width: boxW, height: boxH, borderColor: LINE, borderWidth: 0.8 });
-    text(page, fit(label, bold, 8, boxW - 8), x + (boxW - bold.widthOfTextAtSize(fit(label, bold, 8, boxW - 8), 8)) / 2, y - boxH + 7, 8, bold, MUTED);
+    const x = left + i * (signW + 12);
+    page.drawRectangle({ x, y: y - signH, width: signW, height: signH, borderColor: LINE, borderWidth: 0.8 });
+    centred(fit(label, bold, 8, signW - 8), x + signW / 2, y - signH + 7, 8, bold, MUTED);
   });
-  y -= boxH + 18;
+  y -= signH + 18;
 
   // ── Instructions ──
   section("Instructions");
   const notes = [
-    "Bring this hall ticket (printed on A4) and your Aadhaar card to the venue. Entry without it may be refused.",
-    "Report at the venue for the weigh-in at the time given by the organisers. Your weight must be within your weight class.",
-    "The photograph on this ticket must match the player. Tampered or altered hall tickets are invalid.",
-    "Follow the rules of the tournament and the instructions of the officials.",
+    "Bring this entry pass (printed on A4) and your Aadhaar card to the venue. Entry without it may be refused.",
+    "This pass is for the event shown above only. Each event you entered has its own pass.",
+    "Report for the weigh-in at the time given by the organisers. Your weight must be within the weight class.",
+    "The photograph must match the player. Tampered or altered passes are invalid.",
   ];
   for (const n of notes) {
-    if (y < 72) break;
+    if (y < 64) break;
     text(page, "-", left + 2, y, 8.5, bold, BRAND);
     text(page, fit(n, sans, 8.5, inner - 14), left + 12, y, 8.5, sans);
     y -= 13;
@@ -262,15 +257,18 @@ export async function hallTicketPdf({ tournament: t, student: s, entries, photo 
 
   // ── Footer ──
   page.drawLine({ start: { x: left, y: 50 }, end: { x: right, y: 50 }, thickness: 0.6, color: LINE });
-  const paid = entries.filter((e) => e.paymentStatus === "PAID" && e.paidAt).map((e) => e.paidAt!.getTime());
-  const footerLeft = `Hall ticket ${ticketNo}  |  Issued ${dateTime(new Date())} IST${paid.length ? `  |  Paid ${dateTime(new Date(Math.max(...paid)))}` : ""}`;
-  text(page, fit(footerLeft, sans, 7.5, inner * 0.68), left, 36, 7.5, sans, MUTED);
-  const footerRight = fit(`${settings.orgShortName}${regNo ? `  |  Reg. No. ${regNo}` : ""}`, bold, 8, inner * 0.3);
+  const footerLeft = `${ENTRY_PASS} ${passNo}  |  Issued ${dateTime(new Date())} IST${e.paymentStatus === "PAID" && e.paidAt ? `  |  Paid ${dateTime(e.paidAt)}` : ""}`;
+  text(page, fit(footerLeft, sans, 7, inner * 0.74), left, 36, 7, sans, MUTED);
+  const footerRight = fit(`${settings.orgShortName}${regNo ? `  |  Reg. No. ${regNo}` : ""}`, bold, 8, inner * 0.25);
   text(page, footerRight, right - bold.widthOfTextAtSize(footerRight, 8), 36, 8, bold, BRAND);
 
   const bytes = await pdf.save();
-  const slug = (v: string) => v.replace(/[^A-Za-z0-9_-]+/g, "_");
-  return { filename: `Hall_ticket_${slug(s.studentNo ?? s.fullName)}_${slug(t.slug)}.pdf`, content: Buffer.from(bytes), contentType: "application/pdf" };
+  const slug = (v: string) => v.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/_+/g, "_");
+  return {
+    filename: `Entry_Pass_${slug(s.studentNo ?? s.fullName)}_${slug(e.ageGroup)}_${slug(e.weightCategory)}.pdf`,
+    content: Buffer.from(bytes),
+    contentType: "application/pdf",
+  };
 }
 
 // ─── Issuing ─────────────────────────────────────────────────────────────────
@@ -278,27 +276,34 @@ export async function hallTicketPdf({ tournament: t, student: s, entries, photo 
 const sending = new Set<string>();
 
 /**
- * Email the hall ticket when the student's entries in the tournament are all paid (or free) and at
- * least one of them hasn't been on an emailed hall ticket yet. Safe to call after any change.
+ * Email the passes of the student's events in the tournament that are ready (paid or free) and
+ * haven't been emailed yet: one email, one PDF per event. Safe to call after any change.
  */
-export async function sendHallTicketIfReady(tournamentId: string, studentId: string) {
+export async function sendEntryPassesIfReady(tournamentId: string, studentId: string) {
   const key = `${tournamentId}:${studentId}`;
   if (sending.has(key)) return;
   sending.add(key);
   try {
-    const data = await loadHallTicket(tournamentId, studentId);
-    if (!data || !data.student.email || !hallTicketReady(data.entries)) return;
-    if (data.entries.every((e) => e.hallTicketSentAt)) return;
-    const pdf = await hallTicketPdf(data);
-    const delivery = await sendHallTicket(data.student.email, {
-      fullName: data.student.fullName, studentNo: data.student.studentNo ?? "", tournament: data.tournament.title, ticketNo: hallTicketNo(data.entries), pdf,
+    const [tournament, student, entries] = await Promise.all([
+      prisma.tournament.findUnique({ where: { id: tournamentId } }),
+      prisma.student.findUnique({ where: { id: studentId } }),
+      prisma.registration.findMany({ where: { tournamentId, studentId, hallTicketSentAt: null, paymentStatus: { not: "PENDING" } }, orderBy: { createdAt: "asc" } }),
+    ]);
+    if (!tournament || !student?.email || !entries.length) return;
+    const photo = await loadPhoto(studentId);
+    const pdfs = [];
+    for (const entry of entries) pdfs.push(await entryPassPdf({ tournament, student, entry, photo }));
+    const delivery = await sendEntryPasses(student.email, {
+      fullName: student.fullName, studentNo: student.studentNo ?? "", tournament: tournament.title,
+      events: entries.map((e) => ({ name: `${e.ageGroup} · ${e.gender === "FEMALE" ? "Girls" : "Boys"} ${e.weightCategory}`, passNo: entryPassNo(e) })),
+      pdfs,
     });
     await prisma.emailLog.create({
-      data: { tournamentId, studentId, kind: "HALL_TICKET", trigger: "AUTO", toEmail: delivery.to, subject: delivery.subject, status: delivery.status, error: delivery.error },
+      data: { tournamentId, studentId, kind: "ENTRY_PASS", trigger: "AUTO", toEmail: delivery.to, subject: delivery.subject, status: delivery.status, error: delivery.error },
     });
-    // A failed send is tried again the next time something changes (or the student downloads it).
+    // A failed send is tried again the next time something changes.
     if (delivery.status !== "FAILED") {
-      await prisma.registration.updateMany({ where: { id: { in: data.entries.map((e) => e.id) } }, data: { hallTicketSentAt: new Date() } });
+      await prisma.registration.updateMany({ where: { id: { in: entries.map((e) => e.id) } }, data: { hallTicketSentAt: new Date() } });
     }
   } finally {
     sending.delete(key);
@@ -306,6 +311,6 @@ export async function sendHallTicketIfReady(tournamentId: string, studentId: str
 }
 
 /** Fire-and-forget for request handlers: the entry or payment is saved whether or not the email goes. */
-export function sendHallTicketLater(tournamentId: string, studentId: string) {
-  sendHallTicketIfReady(tournamentId, studentId).catch((err) => console.error("[hall ticket] failed:", err));
+export function sendEntryPassesLater(tournamentId: string, studentId: string) {
+  sendEntryPassesIfReady(tournamentId, studentId).catch((err) => console.error("[entry pass] failed:", err));
 }

@@ -11,7 +11,7 @@ import { ensureAccount } from "../lib/accounts.js";
 import { emailRegistrationLater } from "../lib/registrationEmails.js";
 import { confirmResidency, createStudent, studentSchema } from "../lib/students.js";
 import { closedReason, newEntryTerms, repriceEntries } from "../lib/fees.js";
-import { hallTicketPdf, hallTicketReady, loadHallTicket, sendHallTicketLater } from "../lib/hallTicket.js";
+import { entryPassPdf, entryPassReady, loadEntryPass, sendEntryPassesLater } from "../lib/entryPass.js";
 import { sendPdf } from "./certificates.js";
 import { DATE, DATE_TIME, maskAadhaar, sendWorkbook, yearAge, type Column } from "../lib/excel.js";
 
@@ -322,9 +322,9 @@ router.post("/:id/registrations", async (req, res) => {
     return tx.registration.findMany({ where: { id: { in: ids } }, include: { student: true }, orderBy: { createdAt: "asc" } });
   });
   // A student created here gets the registration email (username, password, PDF). In a free
-  // tournament the hall ticket is emailed now; otherwise once the entries are paid.
+  // event the Tournament Entry Pass is emailed now; otherwise once it is paid.
   if (createdStudent) emailRegistrationLater(createdStudent);
-  if (registrations[0]) sendHallTicketLater(tournament.id, registrations[0].studentId);
+  if (registrations[0]) sendEntryPassesLater(tournament.id, registrations[0].studentId);
   res.status(201).json(input.ageGroups ? registrations : registrations[0]);
 });
 
@@ -406,7 +406,7 @@ const paymentSchema = z.object({
   mode: z.enum(["CASH", "UPI", "OTHER"]).default("CASH"),
 });
 
-/** Record a payment taken by hand (or undo it). Paying the last unpaid entry emails the hall ticket. */
+/** Record a payment taken by hand (or undo it). Paying an event emails its Tournament Entry Pass. */
 router.patch("/:id/registrations/:regId/payment", async (req, res) => {
   const tournamentId = param(req, "id");
   const existing = await prisma.registration.findFirst({ where: { id: param(req, "regId"), tournamentId } });
@@ -418,16 +418,16 @@ router.patch("/:id/registrations/:regId/payment", async (req, res) => {
     ? { paymentStatus: "PAID", paymentMode: input.mode, amountPaid: existing.fee, paidAt: new Date() }
     : { paymentStatus: "PENDING", paymentMode: null, amountPaid: 0, paidAt: null };
   const saved = await prisma.registration.update({ where: { id: existing.id }, data, include: { student: true } });
-  if (input.status === "PAID") sendHallTicketLater(tournamentId, existing.studentId);
+  if (input.status === "PAID") sendEntryPassesLater(tournamentId, existing.studentId);
   res.json(saved);
 });
 
-/** The student's hall ticket for this tournament (all their entries paid or free). ?download=1 to save it. */
-router.get("/:id/hall-tickets/:studentId", async (req, res) => {
-  const data = await loadHallTicket(param(req, "id"), param(req, "studentId"));
-  if (!data) throw notFound("Entry");
-  if (!hallTicketReady(data.entries)) throw new HttpError(409, "The hall ticket is issued once every entry is paid.");
-  const pdf = await hallTicketPdf(data);
+/** One event's Tournament Entry Pass (once paid or free). ?download=1 to save it. */
+router.get("/:id/registrations/:regId/entry-pass", async (req, res) => {
+  const data = await loadEntryPass(param(req, "regId"));
+  if (!data || data.tournament.id !== param(req, "id")) throw notFound("Entry");
+  if (!entryPassReady(data.entry)) throw new HttpError(409, "The entry pass is issued once this event is paid.");
+  const pdf = await entryPassPdf(data);
   sendPdf(res, pdf.content, pdf.filename, req.query.download === "1");
 });
 

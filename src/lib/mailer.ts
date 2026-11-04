@@ -144,18 +144,25 @@ export async function sendRegistrationApproved(to: string, s: { fullName: string
   );
 }
 
-/** After payment (or straight away for a free tournament): the hall ticket as a PDF. */
-export async function sendHallTicket(to: string, s: { fullName: string; studentNo: string; tournament: string; ticketNo: string; pdf: Attachment }) {
+/** After payment (or straight away when free): a Tournament Entry Pass per event, each as its own PDF. */
+export async function sendEntryPasses(to: string, s: { fullName: string; studentNo: string; tournament: string; events: { name: string; passNo: string }[]; pdfs: Attachment[] }) {
+  const many = s.events.length > 1;
+  const list = s.events
+    .map((e) => `<tr><td style="padding:8px 12px;border-top:1px solid #e2e8f0">${escape(e.name)}</td><td style="padding:8px 12px;border-top:1px solid #e2e8f0;font-family:monospace;font-weight:700;color:#ff7400;text-align:right">${escape(e.passNo)}</td></tr>`)
+    .join("");
   return notify(
     to,
-    `Hall ticket — ${s.tournament}`,
+    `Tournament Entry Pass${many ? "es" : ""} — ${s.tournament}`,
     await layout(
-      "Hall ticket",
-      `<p>${escape(s.fullName)}'s hall ticket for <strong>${escape(s.tournament)}</strong> is attached as a PDF.</p>
-       ${box("Hall ticket no.", s.ticketNo)}${s.studentNo ? box("Student ID", s.studentNo) : ""}
-       <p>Print it on A4 paper and bring it, with your Aadhaar card, to the weigh-in. You can download it again any time after logging in.</p>${loginButton()}`,
+      `Tournament Entry Pass${many ? "es" : ""}`,
+      `<p>${escape(s.fullName)}'s Tournament Entry Pass${many ? `es for ${s.events.length} events` : ""} for <strong>${escape(s.tournament)}</strong> ${many ? "are" : "is"} attached — one PDF per event.</p>
+       ${s.studentNo ? box("Student ID", s.studentNo) : ""}
+       <table style="width:100%;border-collapse:collapse;border:1px solid #e2e8f0;border-radius:10px;margin:14px 0;font-size:14px">
+         <tr><th style="padding:8px 12px;text-align:left;color:#64748b;font-size:12px">Event</th><th style="padding:8px 12px;text-align:right;color:#64748b;font-size:12px">Pass no.</th></tr>${list}
+       </table>
+       <p>Print ${many ? "each pass" : "it"} on A4 paper and bring ${many ? "them" : "it"}, with your Aadhaar card, to the weigh-in. You can download ${many ? "them" : "it"} again any time after logging in.</p>${loginButton()}`,
     ),
-    [s.pdf],
+    s.pdfs,
   );
 }
 

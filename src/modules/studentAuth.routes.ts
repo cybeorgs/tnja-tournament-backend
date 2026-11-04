@@ -12,7 +12,7 @@ import { rateLimit } from "../middleware/rateLimit.js";
 import { accountFromPasswordToken, hashPassword, passwordLink, unusablePasswordHash } from "../lib/accounts.js";
 import { sendPasswordReset } from "../lib/mailer.js";
 import { tempIdOf } from "../lib/registrationEmails.js";
-import { hallTicketPdf, hallTicketReady, loadHallTicket } from "../lib/hallTicket.js";
+import { entryPassPdf, entryPassReady, loadEntryPass } from "../lib/entryPass.js";
 import { confirmPayment, createOrder, verifySchema } from "../lib/payments.js";
 import { sendPdf } from "./certificates.js";
 
@@ -138,14 +138,14 @@ studentRouter.get("/me", async (req, res) => {
   res.json({ email: req.student!.email, students: students.map((s) => ({ ...s, tempId: s.studentNo ? null : tempIdOf(s), aadhaarNumber: s.aadhaarNumber ? `XXXX XXXX ${s.aadhaarNumber.slice(-4)}` : null })) });
 });
 
-/** A hall ticket of one of the account's students, once their entries in the tournament are paid (or free). */
-studentRouter.get("/students/:studentId/hall-tickets/:tournamentId", async (req, res) => {
+/** The Tournament Entry Pass of one event of one of the account's students, once that event is paid (or free). */
+studentRouter.get("/students/:studentId/entries/:registrationId/entry-pass", async (req, res) => {
   const student = await prisma.student.findFirst({ where: { id: String(req.params.studentId), email: req.student!.email }, select: { id: true } });
   if (!student) throw notFound("Student");
-  const data = await loadHallTicket(String(req.params.tournamentId), student.id);
-  if (!data) throw notFound("Entry");
-  if (!hallTicketReady(data.entries)) throw new HttpError(409, "Your hall ticket is issued once every entry is paid.");
-  const pdf = await hallTicketPdf(data);
+  const data = await loadEntryPass(String(req.params.registrationId));
+  if (!data || data.student.id !== student.id) throw notFound("Entry");
+  if (!entryPassReady(data.entry)) throw new HttpError(409, "Your entry pass is issued once this event is paid.");
+  const pdf = await entryPassPdf(data);
   sendPdf(res, pdf.content, pdf.filename, req.query.download === "1");
 });
 
@@ -167,7 +167,7 @@ studentRouter.post("/students/:studentId/tournaments/:tournamentId/pay", async (
 studentRouter.post("/students/:studentId/tournaments/:tournamentId/pay/verify", async (req, res) => {
   const student = await ownStudent(req.student!.email, String(req.params.studentId));
   await confirmPayment(String(req.params.tournamentId), student.id, verifySchema.parse(req.body));
-  res.json({ message: "Payment received. Your hall ticket is on its way to your email." });
+  res.json({ message: "Payment received. Your Tournament Entry Passes are on their way to your email." });
 });
 
 studentRouter.post("/change-password", async (req, res) => {
