@@ -15,10 +15,11 @@ export interface AgeGroupDef {
 }
 
 export const AGE_GROUPS: AgeGroupDef[] = [
-  { name: "Mini Sub-Junior Age Group 1", minAge: 7, maxAge: 8, weights: { MALE: [20, 25, 30], FEMALE: [18, 22, 26] } },
-  { name: "Mini Sub-Junior Age Group 2", minAge: 9, maxAge: 10, weights: { MALE: [25, 30, 35], FEMALE: [22, 26, 30] } },
-  { name: "Mini Sub-Junior Age Group 3", minAge: 11, maxAge: 12, weights: { MALE: [30, 35, 40, 45], FEMALE: [28, 32, 36, 40] } },
-  { name: "Sub-Junior", minAge: 13, maxAge: 14, weights: { MALE: [30, 35, 40, 45, 50, 55, 60, 66], FEMALE: [28, 32, 36, 40, 44, 48, 52, 57] } },
+  // Per the TNJA circular (Super Trophy Judo Championship 2026-27). Classes are upper limits; the last is "over".
+  { name: "Mini Sub-Junior Age Group 1", minAge: 6, maxAge: 7, weights: { MALE: [20, 25, 30], FEMALE: [18, 22, 26] } },
+  { name: "Mini Sub-Junior Age Group 2", minAge: 8, maxAge: 9, weights: { MALE: [25, 30, 35], FEMALE: [22, 26, 30] } },
+  { name: "Mini Sub-Junior Age Group 3", minAge: 10, maxAge: 11, weights: { MALE: [30, 35, 40, 45], FEMALE: [28, 32, 36, 40] } },
+  { name: "Sub-Junior", minAge: 12, maxAge: 14, weights: { MALE: [30, 35, 40, 45, 50, 55, 60, 66], FEMALE: [28, 32, 36, 40, 44, 48, 52, 57] } },
   // Cadets (15–17) may enter Cadet, Junior and Senior; juniors (18–20) Junior and Senior; seniors (21+) Senior only.
   { name: "Cadet", minAge: 15, maxAge: 17, weights: { MALE: [50, 55, 60, 66, 73, 81, 90], FEMALE: [40, 44, 48, 52, 57, 63, 70] } },
   { name: "Junior", minAge: 18, maxAge: 20, playUpFrom: 15, weights: { MALE: [55, 60, 66, 73, 81, 90, 100], FEMALE: [44, 48, 52, 57, 63, 70, 78] } },
