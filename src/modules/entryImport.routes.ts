@@ -26,7 +26,7 @@ export const COLUMNS: ImportColumn<Field>[] = [
   { field: "aadhaarNumber", header: "Aadhaar Number", required: false, aliases: ["aadhaar", "aadhar", "aadharnumber"], note: "Used when there is no Student ID", example: "" },
   { field: "fullName", header: "Full Name", required: false, aliases: ["name", "studentname", "playername"], note: "Optional check: must match the student found", example: "Arun Kumar" },
   { field: "ageGroups", header: "Age Groups", required: false, aliases: ["agegroup", "categories", "category", "agecategory"], note: "One or more, separated by commas (e.g. Cadet, Junior, Senior), or All for every eligible group. Empty: the student's own age group", example: "Cadet, Junior" },
-  { field: "weightKg", header: "Weight (kg)", required: true, aliases: ["weight", "weightkg", "bodyweight", "weightentered", "weightenteredkg"], note: "The weight class is worked out from this", example: 52.5 },
+  { field: "weightKg", header: "Weight (kg)", required: true, aliases: ["weight", "weightkg", "bodyweight"], note: "The weight class is worked out from this", example: 52.5 },
   { field: "competeAs", header: "Compete In", required: false, aliases: ["competeas", "competein", "section"], note: "Only for students whose gender is Other: Boys or Girls", example: "" },
 ];
 const LABEL = new Map(COLUMNS.map((c) => [c.field, c.header]));
@@ -55,32 +55,8 @@ function parseCompeteAs(v: Cell | undefined): Gender | undefined | null {
 
 const sameName = (a: string, b: string) => key(a) === key(b);
 
-/**
- * An Entries export has one row per entry, so a student in Junior and Senior is on two rows.
- * Rows for the same student with the same weight become one row with both age groups; any
- * other repeat is left alone and reported as "Same student as row …".
- */
-function mergeRepeatedStudents(rows: Row[]): Row[] {
-  const firstFor = new Map<string, Row>();
-  const merged: Row[] = [];
-  for (const { row, values } of rows) {
-    const id = str(values.studentNo).toUpperCase() || digits(values.aadhaarNumber);
-    const first = id ? firstFor.get(id) : undefined;
-    const groups = str(values.ageGroups);
-    if (first && groups && str(first.values.ageGroups) && str(first.values.weightKg) === str(values.weightKg)) {
-      first.values.ageGroups = `${str(first.values.ageGroups)}, ${groups}`;
-      continue;
-    }
-    const copy = { row, values: { ...values } };
-    if (id && !first) firstFor.set(id, copy);
-    merged.push(copy);
-  }
-  return merged;
-}
-
 /** `db`: the Prisma client, or a transaction (tests) */
-export async function checkRows(tournament: Tournament, sheetRows: Row[], db: Pick<typeof prisma, "student" | "registration"> = prisma, onProgress?: (done: number) => void): Promise<CheckedRow[]> {
-  const rows = mergeRepeatedStudents(sheetRows);
+export async function checkRows(tournament: Tournament, rows: Row[], db: Pick<typeof prisma, "student" | "registration"> = prisma, onProgress?: (done: number) => void): Promise<CheckedRow[]> {
   const ids = rows.map((r) => str(r.values.studentNo).toUpperCase()).filter(Boolean);
   const aadhaars = rows.map((r) => digits(r.values.aadhaarNumber)).filter(Boolean);
   const students = await db.student.findMany({ where: { OR: [{ studentNo: { in: ids } }, { aadhaarNumber: { in: aadhaars } }] } });
@@ -171,7 +147,6 @@ router.get("/registrations/import/template", async (req, res) => {
     "Students must already be on the Students page (add many at once with Students → Import).",
     `Age groups in this tournament: ${tournament.ageGroups.join(", ")}. Cadets (15–17) may enter Cadet, Junior and Senior; juniors (18–20) Junior and Senior.`,
     "Each age group is a separate entry and is charged the entry fee. The weight class is worked out from the weight.",
-    "An Entries export from another tournament can be uploaded as it is: a student's rows with the same weight become one student entered in each of those age groups.",
     `Up to ${MAX_ROWS} students per file. Save as .xlsx (or .csv).`,
   ]);
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
