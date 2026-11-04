@@ -11,6 +11,8 @@ import { ensureAccount } from "../lib/accounts.js";
 import { emailRegistrationLater } from "../lib/registrationEmails.js";
 import { confirmResidency, createStudent, studentSchema } from "../lib/students.js";
 import { closedReason, newEntryTerms } from "../lib/fees.js";
+import { hallTicketPdf, hallTicketReady, loadHallTicket, sendHallTicketLater } from "../lib/hallTicket.js";
+import { sendPdf } from "./certificates.js";
 import { DATE, DATE_TIME, maskAadhaar, sendWorkbook, yearAge, type Column } from "../lib/excel.js";
 
 const router = Router();
@@ -23,12 +25,14 @@ const tournamentSchema = z
     description: z.string().trim().max(5000).default(""),
     venue: z.string().trim().min(2, "Venue is required").max(200),
     city: z.string().trim().max(80).default(""),
-    /** Date and time the tournament starts; registration closes at this moment */
+    /** Date and time the tournament starts */
     startDate: z.coerce.date({ error: "Start date and time are required" }),
     endDate: z.coerce.date().nullable().optional(),
     registrationOpensAt: z.coerce.date({ error: "Registration opening date and time are required" }),
-    /** End of regular registration; late registration runs from here until the start */
-    registrationClosesAt: z.coerce.date({ error: "Regular registration closing date and time are required" }),
+    /** Registration closes here. There is no late registration. */
+    registrationClosesAt: z.coerce.date({ error: "Registration closing date and time are required" }),
+    /** Entry fee per entry (age group) in rupees; 0 = free */
+    entryFee: z.coerce.number({ error: "Enter the entry fee" }).int("Use whole rupees").min(0, "The fee can't be negative").max(100000),
     level: z.enum(TOURNAMENT_LEVELS),
     gender: z.enum(["MALE", "FEMALE", "BOTH"]),
     ageGroups: z.array(z.enum(AGE_GROUP_NAMES as [string, ...string[]])).min(1, "Pick at least one age group"),
@@ -38,11 +42,11 @@ const tournamentSchema = z
   })
   // The end date is a date only, so compare whole days (the start has a time of day).
   .refine((t) => !t.endDate || t.endDate.getTime() > t.startDate.getTime() - 24 * 60 * 60 * 1000, { message: "End date cannot be before the start date", path: ["endDate"] })
-  .refine((t) => t.registrationOpensAt < t.registrationClosesAt, { message: "Regular registration must close after it opens", path: ["registrationClosesAt"] })
-  .refine((t) => t.registrationClosesAt <= t.startDate, { message: "Regular registration must close before the tournament starts", path: ["registrationClosesAt"] });
+  .refine((t) => t.registrationOpensAt < t.registrationClosesAt, { message: "Registration must close after it opens", path: ["registrationClosesAt"] })
+  .refine((t) => t.registrationClosesAt <= t.startDate, { message: "Registration must close before the tournament starts", path: ["registrationClosesAt"] });
 
-/** Registration is free: fees are always 0 and there is no payment reminder. */
-const free = { entryFee: 0, lateEntryFee: 0, reminderAt: null };
+/** Late registration and payment reminders are gone: these old columns always stay empty. */
+const noLate = { lateEntryFee: 0, reminderAt: null };
 
 router.get("/", async (_req, res) => {
   const tournaments = await prisma.tournament.findMany({
@@ -58,7 +62,7 @@ router.post("/", async (req, res) => {
   const data = tournamentSchema.parse(req.body);
   // A new tournament is live on the public site straight away; there is no draft stage.
   const tournament = await prisma.tournament.create({
-    data: { ...data, ...free, endDate: data.endDate ?? null, slug: slugify(data.title), status: "PUBLISHED", publishedAt: new Date() },
+    data: { ...data, ...noLate, endDate: data.endDate ?? null, slug: slugify(data.title), status: "PUBLISHED", publishedAt: new Date() },
   });
   res.status(201).json(tournament);
 });
@@ -68,7 +72,7 @@ router.get("/:id", async (req, res) => {
   const [registrations, referees, draws] = await Promise.all([
     prisma.registration.findMany({
       where: { tournamentId: tournament.id },
-      select: { studentId: true, ageGroup: true, gender: true, weightCategory: true, isLate: true, weighInStatus: true },
+      select: { studentId: true, ageGroup: true, gender: true, weightCategory: true, weighInStatus: true, paymentStatus: true, fee: true, amountPaid: true },
     }),
     prisma.tournamentReferee.count({ where: { tournamentId: tournament.id } }),
     prisma.draw.findMany({ where: { tournamentId: tournament.id }, select: { isConcluded: true } }),
@@ -81,8 +85,10 @@ router.get("/:id", async (req, res) => {
       registrations: registrations.length,
       // Players (a player may enter several age groups)
       players: players.size,
-      regularEntries: registrations.filter((r) => !r.isLate).length,
-      lateEntries: registrations.filter((r) => r.isLate).length,
+      paidEntries: registrations.filter((r) => r.paymentStatus === "PAID").length,
+      unpaidEntries: registrations.filter((r) => r.paymentStatus === "PENDING").length,
+      amountCollected: registrations.reduce((n, r) => n + (r.paymentStatus === "PAID" ? r.amountPaid : 0), 0),
+      amountDue: registrations.reduce((n, r) => n + (r.paymentStatus === "PENDING" ? r.fee : 0), 0),
       weighedIn: registrations.filter((r) => r.weighInStatus === "CLEARED").length,
       referees,
       categories: categories.size,
@@ -104,7 +110,17 @@ router.put("/:id", async (req, res) => {
     const clash = await prisma.registration.count({ where: { tournamentId: existing.id, ageGroup: { in: removedGroups } } });
     if (clash) throw new HttpError(409, `Students are registered in ${removedGroups.join(", ")}. Remove them before dropping that age group.`);
   }
-  const tournament = await prisma.tournament.update({ where: { id: existing.id }, data: { ...data, ...free, endDate: data.endDate ?? null } });
+  const tournament = await prisma.$transaction(async (tx) => {
+    const updated = await tx.tournament.update({ where: { id: existing.id }, data: { ...data, ...noLate, endDate: data.endDate ?? null } });
+    if (data.entryFee !== existing.entryFee) {
+      // Unpaid entries owe the new fee (a free tournament owes nothing). Paid entries keep what they paid.
+      await tx.registration.updateMany({
+        where: { tournamentId: existing.id, paymentStatus: "PENDING" },
+        data: data.entryFee > 0 ? { fee: data.entryFee } : { fee: 0, paymentStatus: "WAIVED" },
+      });
+    }
+    return updated;
+  });
   res.json(tournament);
 });
 
@@ -238,7 +254,10 @@ router.get("/:id/registrations/export", async (req, res) => {
     { header: "Blood group", value: (r) => r.student.bloodGroup },
     { header: "Aadhaar", width: 18, value: (r) => maskAadhaar(r.student.aadhaarNumber) },
     { header: "Institution", width: 28, value: (r) => r.student.institutionName },
-    { header: "Registration", value: (r) => (r.isLate ? "Late" : "Regular") },
+    { header: "Fee (₹)", value: (r) => r.fee },
+    { header: "Payment", value: (r) => label(r.paymentStatus, { PENDING: "Unpaid", PAID: "Paid", WAIVED: "Free" }) },
+    { header: "Amount paid (₹)", value: (r) => r.amountPaid },
+    { header: "Paid on", value: (r) => r.paidAt, format: DATE_TIME },
     { header: "Placement", value: (r) => label(r.placement, { FIRST: "1st", SECOND: "2nd", THIRD: "3rd", PARTICIPATION: "Participation" }) },
     { header: "Certificate no.", width: 18, value: (r) => r.certificateNo },
     { header: "Registered on", value: (r) => r.createdAt, format: DATE_TIME },
@@ -259,7 +278,7 @@ router.get("/:id/registrations", async (req, res) => {
 
 router.post("/:id/registrations", async (req, res) => {
   const tournament = await findTournament(param(req, "id"));
-  // Admin entries follow the same schedule: regular fee, then the late fee, none after the start.
+  // Admin entries follow the same schedule and are charged the same entry fee.
   const terms = newEntryTerms(tournament);
   if (!terms) throw new HttpError(409, `${closedReason(tournament)} To change this, edit the registration dates.`);
   const input = registrationSchema.parse(req.body);
@@ -299,8 +318,10 @@ router.post("/:id/registrations", async (req, res) => {
     }
     return saved;
   });
-  // A student created here gets the registration email (username, password, PDF); entries send no email.
+  // A student created here gets the registration email (username, password, PDF). In a free
+  // tournament the hall ticket is emailed now; otherwise once the entries are paid.
   if (createdStudent) emailRegistrationLater(createdStudent);
+  if (registrations[0]) sendHallTicketLater(tournament.id, registrations[0].studentId);
   res.status(201).json(input.ageGroups ? registrations : registrations[0]);
 });
 
@@ -374,6 +395,37 @@ router.patch("/:id/registrations/:regId/weigh-in", async (req, res) => {
     }
   }
   res.json(await prisma.registration.update({ where: { id: existing.id }, data, include: { student: true } }));
+});
+
+const paymentSchema = z.object({
+  /** PAID: payment received outside the website (cash, UPI…). PENDING: undo that. */
+  status: z.enum(["PAID", "PENDING"]),
+  mode: z.enum(["CASH", "UPI", "OTHER"]).default("CASH"),
+});
+
+/** Record a payment taken by hand (or undo it). Paying the last unpaid entry emails the hall ticket. */
+router.patch("/:id/registrations/:regId/payment", async (req, res) => {
+  const tournamentId = param(req, "id");
+  const existing = await prisma.registration.findFirst({ where: { id: param(req, "regId"), tournamentId } });
+  if (!existing) throw notFound("Registration");
+  const input = paymentSchema.parse(req.body);
+  if (existing.paymentStatus === "WAIVED") throw new HttpError(409, "This entry is free — there is nothing to pay.");
+  if (input.status === "PENDING" && existing.paymentMode === "RAZORPAY") throw new HttpError(409, "This entry was paid online, so it can't be marked unpaid here.");
+  const data = input.status === "PAID"
+    ? { paymentStatus: "PAID", paymentMode: input.mode, amountPaid: existing.fee, paidAt: new Date() }
+    : { paymentStatus: "PENDING", paymentMode: null, amountPaid: 0, paidAt: null };
+  const saved = await prisma.registration.update({ where: { id: existing.id }, data, include: { student: true } });
+  if (input.status === "PAID") sendHallTicketLater(tournamentId, existing.studentId);
+  res.json(saved);
+});
+
+/** The student's hall ticket for this tournament (all their entries paid or free). ?download=1 to save it. */
+router.get("/:id/hall-tickets/:studentId", async (req, res) => {
+  const data = await loadHallTicket(param(req, "id"), param(req, "studentId"));
+  if (!data) throw notFound("Entry");
+  if (!hallTicketReady(data.entries)) throw new HttpError(409, "The hall ticket is issued once every entry is paid.");
+  const pdf = await hallTicketPdf(data);
+  sendPdf(res, pdf.content, pdf.filename, req.query.download === "1");
 });
 
 router.delete("/:id/registrations/:regId", async (req, res) => {

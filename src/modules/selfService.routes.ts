@@ -1,9 +1,9 @@
 // Public self-service.
-// Students register themselves (email verified by OTP; registration is free). Tamil Nadu residents
+// Students register themselves (email verified by OTP). Tamil Nadu residents
 // get their permanent student ID straight away; anyone else uploads proof (e.g. a nativity
 // certificate) and waits for an admin to approve it. Every registration gets a login (one per email),
 // emailed to them. Approved students enter tournaments in one or more age groups (e.g. a cadet in
-// Cadet, Junior and Senior), usually in the registration form itself. Entering is free.
+// Cadet, Junior and Senior), usually in the registration form itself. Each entry is charged the entry fee.
 // Referees register themselves as officials of a tournament the same way (no fee).
 import { Router } from "express";
 import { z } from "zod";
@@ -19,7 +19,8 @@ import { emailRegistrationLater, tempIdOf } from "../lib/registrationEmails.js";
 import { assertEmailVerified, checkEmailOtp, createEmailOtp, createEmailVerifiedToken } from "../lib/emailOtp.js";
 import { sendEmailOtp } from "../lib/mailer.js";
 import { assertAadhaarVerified } from "../lib/aadhaar.js";
-import { closedReason, newEntryTerms, registrationPhase } from "../lib/fees.js";
+import { closedReason, newEntryTerms } from "../lib/fees.js";
+import { sendHallTicketLater } from "../lib/hallTicket.js";
 import { competeAsSchema, resolveCategory } from "./tournaments.routes.js";
 import { refereeSchema } from "./people.routes.js";
 
@@ -48,6 +49,8 @@ const registerSchema = studentSchema.and(
     emailVerificationToken: z.string({ error: "Please verify your email address." }).min(1, "Please verify your email address."),
     /** From POST /aadhaar/digilocker/check: Aadhaar verified, with its address in the residing pincode */
     aadhaarVerificationToken: z.string().optional(),
+    /** data: URL of the passport-size photograph (JPG/PNG), required for everyone */
+    photo: z.string({ error: "Please upload a passport-size photograph." }).min(1, "Please upload a passport-size photograph."),
     /** data: URLs. BPL proof for Tamil Nadu BPL families; proof of nativity for everyone outside Tamil Nadu. */
     bplProof: z.string().optional(),
     nativityProof: z.string().optional(),
@@ -62,15 +65,15 @@ const registerSchema = studentSchema.and(
       })
       .optional(),
   }),
-);
+).refine((r) => r.weightKg !== null, { message: "Enter the player's weight", path: ["weightKg"] });
 
 router.post("/students/register", registerLimiter, async (req, res) => {
-  const { agreedToTerms: _agreed, emailVerificationToken, aadhaarVerificationToken, bplProof, nativityProof, nativityProofLabel, entry, ...form } = registerSchema.parse(req.body);
+  const { agreedToTerms: _agreed, emailVerificationToken, aadhaarVerificationToken, photo, bplProof, nativityProof, nativityProofLabel, entry, ...form } = registerSchema.parse(req.body);
   assertEmailVerified(emailVerificationToken, form.email);
-  assertAadhaarVerified(aadhaarVerificationToken, form.aadhaarNumber, form.residingPincode);
+  assertAadhaarVerified(aadhaarVerificationToken, form.aadhaarNumber, form.residingPincode, form.dob);
   const data = await confirmResidency(form);
 
-  const documents: StudentUpload[] = [];
+  const documents: StudentUpload[] = [{ kind: "PHOTO", label: "Passport photo", ...decodeUpload(photo, "The photograph", 1024 * 1024, { imageOnly: true }) }];
   if (data.outsideTamilNadu) {
     if (!nativityProof) throw new HttpError(400, "Please upload a nativity certificate or other proof — your address is outside Tamil Nadu.");
     documents.push({ kind: "NATIVITY_PROOF", label: nativityProofLabel || "Nativity certificate", ...decodeUpload(nativityProof, "The proof document") });
@@ -106,6 +109,8 @@ router.post("/students/register", registerLimiter, async (req, res) => {
   const entered = tournament && student.status === "APPROVED" ? await studentEntries(tournament.id, student.id) : [];
   // The registration email: username and password (Tamil Nadu: with the registration PDF; others: a temporary ID).
   emailRegistrationLater(student);
+  // Free tournament: the hall ticket goes out now. Otherwise it is emailed once the entries are paid.
+  if (entered.length && tournament) sendHallTicketLater(tournament.id, student.id);
   res.status(201).json({
     status: student.status, studentNo: student.studentNo, tempId: student.studentNo ? null : tempIdOf(student), fullName: student.fullName, email: student.email, newAccount: account.created,
     entries: entered.map(entryView),
@@ -162,7 +167,7 @@ const sameDay = (a: Date, b: Date) => a.toISOString().slice(0, 10) === b.toISOSt
 async function openTournament(slug: string) {
   const tournament = await prisma.tournament.findFirst({ where: { slug, status: "PUBLISHED" } });
   if (!tournament) throw notFound("Tournament");
-  // Regular or late registration, by the schedule.
+  // Open between registrationOpensAt and registrationClosesAt.
   const terms = newEntryTerms(tournament);
   if (!terms) throw new HttpError(409, closedReason(tournament));
   return { ...tournament, terms };
@@ -172,7 +177,7 @@ async function openTournament(slug: string) {
 async function upcomingTournament(slug: string) {
   const tournament = await prisma.tournament.findFirst({ where: { slug, status: "PUBLISHED" } });
   if (!tournament) throw notFound("Tournament");
-  if (registrationPhase(tournament) === "CLOSED") throw new HttpError(409, "This tournament has already started.");
+  if (tournament.status === "COMPLETED" || new Date() >= tournament.startDate) throw new HttpError(409, "This tournament has already started.");
   return tournament;
 }
 
@@ -186,8 +191,8 @@ async function identify(input: z.infer<typeof identifySchema>) {
   return student;
 }
 
-const entryView = (r: { id: string; ageGroup: string; gender: string; weightCategory: string; weightKg: number; isLate: boolean }) => ({
-  id: r.id, ageGroup: r.ageGroup, gender: r.gender, weightCategory: r.weightCategory, weightKg: r.weightKg, isLate: r.isLate,
+const entryView = (r: { id: string; ageGroup: string; gender: string; weightCategory: string; weightKg: number; fee: number; paymentStatus: string }) => ({
+  id: r.id, ageGroup: r.ageGroup, gender: r.gender, weightCategory: r.weightCategory, weightKg: r.weightKg, fee: r.fee, paymentStatus: r.paymentStatus,
 });
 
 const studentEntries = (tournamentId: string, studentId: string) =>
@@ -201,7 +206,7 @@ router.post("/tournaments/:slug/entry/check", entryLimiter, async (req, res) => 
     student: { studentNo: student.studentNo, fullName: student.fullName, gender: student.gender },
     genderAllowed: tournament.gender === "BOTH" || student.gender === "OTHER" || tournament.gender === student.gender,
     ageGroups: eligibleAgeGroups(student.dob, tournament.startDate, tournament.ageGroups),
-    lateRegistration: tournament.terms.isLate,
+    entryFee: tournament.entryFee,
     entries: (await studentEntries(tournament.id, student.id)).map(entryView),
   });
 });
@@ -212,7 +217,7 @@ const enterSchema = identifySchema.extend({
   competeAs: competeAsSchema,
 });
 
-/** Step 2: enter the chosen age groups (one entry each). Entering is free and confirmed straight away. */
+/** Step 2: enter the chosen age groups (one entry each). With an entry fee each entry is unpaid (PENDING) until paid. */
 router.post("/tournaments/:slug/entry", entryLimiter, async (req, res) => {
   const tournament = await openTournament(param(req, "slug"));
   const input = enterSchema.parse(req.body);
@@ -229,6 +234,7 @@ router.post("/tournaments/:slug/entry", entryLimiter, async (req, res) => {
     }
   });
 
+  sendHallTicketLater(tournament.id, student.id);
   res.json({ entries: (await studentEntries(tournament.id, student.id)).map(entryView) });
 });
 

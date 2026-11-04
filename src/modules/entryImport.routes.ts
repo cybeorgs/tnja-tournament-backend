@@ -146,7 +146,7 @@ router.get("/registrations/import/template", async (req, res) => {
     "Weight (kg) is required, plus the Student ID or the Aadhaar number to find the student. Replace the example row (row 2).",
     "Students must already be on the Students page (add many at once with Students → Import).",
     `Age groups in this tournament: ${tournament.ageGroups.join(", ")}. Cadets (15–17) may enter Cadet, Junior and Senior; juniors (18–20) Junior and Senior.`,
-    "Each age group is a separate entry (registration is free). The weight class is worked out from the weight.",
+    "Each age group is a separate entry and is charged the entry fee. The weight class is worked out from the weight.",
     `Up to ${MAX_ROWS} students per file. Save as .xlsx (or .csv).`,
   ]);
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -182,7 +182,7 @@ router.post("/registrations/import", express.raw({ type: () => true, limit: "5mb
     if (dryRun) {
       return {
         rows: checked.map(summary), valid: valid.length, invalid: checked.length - valid.length,
-        entries: valid.reduce((n, r) => n + r.plan!.categories.length, 0), isLate: terms.isLate, missingColumns, unknownColumns: unknown,
+        entries: valid.reduce((n, r) => n + r.plan!.categories.length, 0), entryFee: terms.fee, missingColumns, unknownColumns: unknown,
       };
     }
 

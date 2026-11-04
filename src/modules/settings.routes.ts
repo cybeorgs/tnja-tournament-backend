@@ -11,6 +11,7 @@ const publicView = (s: Omit<Settings, "logo"> & { logo: Uint8Array | null; custo
   orgName: s.orgName,
   orgShortName: s.orgShortName,
   tagline: s.tagline,
+  regNo: s.regNo,
   signatory1Name: s.signatory1Name,
   signatory1Title: s.signatory1Title,
   signatory2Name: s.signatory2Name,
@@ -29,6 +30,8 @@ const settingsSchema = z.object({
   orgName: z.string().trim().min(1, "Organisation name is required").max(120),
   orgShortName: z.string().trim().min(1, "Short name is required").max(20),
   tagline: z.string().trim().max(160).default(""),
+  /** Society registration number, e.g. 329-2017 */
+  regNo: z.string().trim().max(40).default(""),
   signatory1Name: z.string().trim().max(80).default(""),
   signatory1Title: z.string().trim().max(80).default(""),
   signatory2Name: z.string().trim().max(80).default(""),

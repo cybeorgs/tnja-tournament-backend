@@ -1,12 +1,13 @@
 // Aadhaar verification through DigiLocker (via Sandbox), with the same call limits as the main TNJA
 // site. The student signs in to DigiLocker in a popup and consents to share their Aadhaar; the form
 // then calls /check. Verification passes only when the Aadhaar's last 4 digits match the number
-// entered AND the pincode on the Aadhaar address matches the residing pincode the student gave.
+// entered, the pincode on the Aadhaar address matches the residing pincode the student gave, AND the
+// date of birth on the Aadhaar matches the one entered.
 import { Router, type Request, type Response } from "express";
 import prisma from "../db.js";
 import { aadhaarLimits } from "../middleware/rateLimit.js";
 import { SandboxError, fetchDigilockerAadhaar, getDigilockerSessionStatus, initDigilockerSession, isSandboxConfigured } from "../lib/sandbox.js";
-import { createSessionToken, createVerifiedToken, isValidAadhaar, isValidPincode, readSessionToken } from "../lib/aadhaar.js";
+import { createSessionToken, createVerifiedToken, dobMatches, isValidAadhaar, isValidDob, isValidPincode, normaliseAadhaarDob, readSessionToken } from "../lib/aadhaar.js";
 
 const router = Router();
 
@@ -24,9 +25,10 @@ const START_COOLDOWN_MS = 15 * 1000;
 const lastStartAt = new Map<string, number>();
 
 router.post("/aadhaar/digilocker/start", aadhaarLimits.start, async (req: Request, res: Response) => {
-  const { aadhaarNumber, pincode } = req.body ?? {};
+  const { aadhaarNumber, pincode, dob } = req.body ?? {};
   if (!isValidAadhaar(aadhaarNumber)) return res.status(400).json({ error: "Please enter a valid 12-digit Aadhaar number." });
   if (!isValidPincode(pincode)) return res.status(400).json({ error: "Please enter your 6-digit pincode first." });
+  if (!isValidDob(dob)) return res.status(400).json({ error: "Please enter your date of birth first." });
   if (!isSandboxConfigured()) return notConfigured(res);
 
   // Don't pay for a session that can't lead to a registration.
@@ -44,7 +46,7 @@ router.post("/aadhaar/digilocker/start", aadhaarLimits.start, async (req: Reques
 
   try {
     const { sessionId, authorizationUrl } = await initDigilockerSession();
-    res.json({ authorizationUrl, digilockerSessionToken: createSessionToken(aadhaarNumber, pincode, sessionId) });
+    res.json({ authorizationUrl, digilockerSessionToken: createSessionToken(aadhaarNumber, pincode, dob, sessionId) });
   } catch (error) {
     if (error instanceof SandboxError) return sandboxFailure(res, error);
     throw error;
@@ -67,7 +69,7 @@ const verifiedSessions = new Map<string, { outcome: CheckOutcome; expiresAt: num
 // A check already talking to Sandbox: concurrent requests for the same session share its result.
 const checksInFlight = new Map<string, Promise<CheckOutcome>>();
 
-async function runCheck(sessionId: string, aadhaarNumber: string, pincode: string): Promise<CheckOutcome> {
+async function runCheck(sessionId: string, aadhaarNumber: string, pincode: string, dob: string): Promise<CheckOutcome> {
   try {
     const status = await getDigilockerSessionStatus(sessionId);
     if (status === "created") return { httpStatus: 200, body: { status: "pending" } };
@@ -94,9 +96,19 @@ async function runCheck(sessionId: string, aadhaarNumber: string, pincode: strin
       };
     }
 
+    const aadhaarDob = normaliseAadhaarDob(details.dateOfBirth);
+    if (!aadhaarDob) {
+      return { httpStatus: 400, body: { error: "Your Aadhaar does not show a date of birth, so it can't be matched. Please contact the TNJA office." } };
+    }
+    if (!dobMatches(aadhaarDob, dob)) {
+      const shown = aadhaarDob.length === 4 ? `year of birth (${aadhaarDob})` : `date of birth (${aadhaarDob.slice(8, 10)}/${aadhaarDob.slice(5, 7)}/${aadhaarDob.slice(0, 4)})`;
+      // The student is looking at their own Aadhaar, so telling them its date helps them fix the form.
+      return { httpStatus: 400, body: { error: `The ${shown} on your Aadhaar does not match the date of birth you entered. Go back and enter the date of birth on your Aadhaar.` } };
+    }
+
     return {
       httpStatus: 200,
-      body: { status: "verified", aadhaarVerificationToken: createVerifiedToken(aadhaarNumber, pincode), aadhaarDetails: { name: details.name } },
+      body: { status: "verified", aadhaarVerificationToken: createVerifiedToken(aadhaarNumber, pincode, dob), aadhaarDetails: { name: details.name } },
     };
   } catch (error) {
     if (error instanceof SandboxError) return { httpStatus: error.status >= 500 ? 502 : 400, body: { error: error.message } };
@@ -105,7 +117,7 @@ async function runCheck(sessionId: string, aadhaarNumber: string, pincode: strin
   }
 }
 
-/** Returns { status: "pending" } until the student consents in DigiLocker, then verifies the Aadhaar and pincode. */
+/** Returns { status: "pending" } until the student consents in DigiLocker, then verifies the Aadhaar, pincode and date of birth. */
 router.post("/aadhaar/digilocker/check", aadhaarLimits.check, async (req: Request, res: Response) => {
   const { aadhaarNumber, digilockerSessionToken } = req.body ?? {};
   if (!isValidAadhaar(aadhaarNumber)) return res.status(400).json({ error: "Please enter a valid 12-digit Aadhaar number." });
@@ -113,9 +125,9 @@ router.post("/aadhaar/digilocker/check", aadhaarLimits.check, async (req: Reques
 
   const session = readSessionToken(digilockerSessionToken, aadhaarNumber);
   if (!session) return res.status(400).json({ error: "Verification session expired. Please click Verify again." });
-  const { sessionId, pincode } = session;
+  const { sessionId, pincode, dob } = session;
 
-  const key = `${sessionId}:${aadhaarNumber}:${pincode}`;
+  const key = `${sessionId}:${aadhaarNumber}:${pincode}:${dob}`;
   const now = Date.now();
   const verified = verifiedSessions.get(key);
   if (verified && verified.expiresAt > now) return res.status(verified.outcome.httpStatus).json(verified.outcome.body);
@@ -131,7 +143,7 @@ router.post("/aadhaar/digilocker/check", aadhaarLimits.check, async (req: Reques
   lastCheckAt.set(sessionId, now);
   for (const [k, at] of lastCheckAt) if (now - at > SESSION_TTL_MS) lastCheckAt.delete(k);
 
-  const check = runCheck(sessionId, aadhaarNumber, pincode);
+  const check = runCheck(sessionId, aadhaarNumber, pincode, dob);
   checksInFlight.set(key, check);
   let outcome: CheckOutcome;
   try {

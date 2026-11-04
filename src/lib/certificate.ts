@@ -126,7 +126,8 @@ async function drawCertificate(pdf: PDFDocument, data: CertificateData, event: C
   }
 
   centered(page, settings.orgName.toUpperCase(), top - 14, sansBold, fitSize(settings.orgName.toUpperCase(), sansBold, 18, width - 160), INK);
-  if (settings.tagline) centered(page, settings.tagline, top - 32, sans, 10, MUTED);
+  const sub = [settings.regNo.trim() && `Reg. No. ${settings.regNo.trim()}`, settings.tagline].filter(Boolean).join("  |  ");
+  if (sub) centered(page, sub, top - 32, sans, 10, MUTED);
 
   const title = data.kind === "REFEREE"
     ? "CERTIFICATE OF APPRECIATION"

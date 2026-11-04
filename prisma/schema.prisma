@@ -24,6 +24,8 @@ model Settings {
   orgName         String   @default("Tamil Nadu Judo Association")
   orgShortName    String   @default("TNJA")
   tagline         String   @default("Affiliated to Judo Federation of India")
+  /// Society registration number, shown next to the name on the site and on every PDF
+  regNo           String   @default("329-2017")
   signatory1Name  String   @default("")
   signatory1Title String   @default("President")
   signatory2Name  String   @default("")
@@ -122,6 +124,12 @@ model Student {
   grade            String   @default("")
   degreeDepartment String   @default("")
   coachName        String   @default("")
+  // ── Additional details (printed on the hall ticket) ──
+  /// Body weight given at registration, kg (each tournament entry records its own weight too)
+  weightKg          Float?
+  managerName       String   @default("")
+  districtPresident String   @default("")
+  districtSecretary String   @default("")
   /// SELF (public registration form) | ADMIN
   source           String   @default("ADMIN")
   createdAt        DateTime @default(now())
@@ -134,11 +142,11 @@ model Student {
   @@index([status])
 }
 
-/// Files uploaded with a registration: BPL proof, or proof of nativity for applicants outside Tamil Nadu.
+/// Files uploaded with a registration: the passport-size photo, BPL proof, or proof of nativity for applicants outside Tamil Nadu.
 model StudentDocument {
   id        String   @id @default(uuid())
   studentId String
-  /// BPL_PROOF | NATIVITY_PROOF
+  /// PHOTO | BPL_PROOF | NATIVITY_PROOF
   kind      String
   /// What the applicant says the file is, e.g. "Nativity certificate"
   label     String   @default("")
@@ -202,6 +210,9 @@ model Registration {
   confirmationSentAt DateTime?
   /// Deadline reminder email sent (so it goes out once per entry)
   reminderSentAt     DateTime?
+  /// Hall ticket emailed with this entry on it. Once all of a student's entries in a tournament are
+  /// paid (or free), a hall ticket is emailed if any of them hasn't been on one yet.
+  hallTicketSentAt   DateTime?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
@@ -276,7 +287,7 @@ model EmailLog {
   id           String   @id @default(uuid())
   tournamentId String
   studentId    String?
-  /// CONFIRMATION | REMINDER | PAYMENT
+  /// CONFIRMATION | REMINDER | PAYMENT | HALL_TICKET
   kind         String
   /// AUTO (sent by the system) | MANUAL (sent by an admin)
   trigger      String   @default("AUTO")

@@ -36,14 +36,16 @@ const escape = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": 
 
 /** Branded email shell; `body` is trusted HTML (escape anything user-supplied before passing it). */
 async function layout(subtitle: string, body: string) {
-  const org = escape((await getSettings()).orgName);
+  const settings = await getSettings();
+  const org = escape(settings.orgName);
+  const regNo = settings.regNo.trim() ? `<p style="color:#ffe7d4;margin:4px 0 0;font-size:12px">Reg. No. ${escape(settings.regNo.trim())}</p>` : "";
   return `<!DOCTYPE html>
 <html>
 <body style="margin:0;background:#f8fafc;font-family:Arial,Helvetica,sans-serif;color:#334155">
   <div style="padding:40px 16px">
     <div style="max-width:560px;margin:auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #e2e8f0">
       <div style="background:#ff7400;padding:28px 32px;text-align:center">
-        <h1 style="color:#fff;margin:0;font-size:20px">${org}</h1>
+        <h1 style="color:#fff;margin:0;font-size:20px">${org}</h1>${regNo}
         <p style="color:#ffe7d4;margin:6px 0 0">${subtitle}</p>
       </div>
       <div style="padding:32px;line-height:1.6">${body}</div>
@@ -137,6 +139,21 @@ export async function sendRegistrationApproved(to: string, s: { fullName: string
       "Registration approved",
       `<p>Good news — ${escape(s.fullName)}'s registration has been approved.</p>${box("Student ID", s.studentNo)}
        <p>The registration confirmation is attached as a PDF. Log in with the same username and password as before.</p>${loginButton()}`,
+    ),
+    [s.pdf],
+  );
+}
+
+/** After payment (or straight away for a free tournament): the hall ticket as a PDF. */
+export async function sendHallTicket(to: string, s: { fullName: string; studentNo: string; tournament: string; ticketNo: string; pdf: Attachment }) {
+  return notify(
+    to,
+    `Hall ticket — ${s.tournament}`,
+    await layout(
+      "Hall ticket",
+      `<p>${escape(s.fullName)}'s hall ticket for <strong>${escape(s.tournament)}</strong> is attached as a PDF.</p>
+       ${box("Hall ticket no.", s.ticketNo)}${s.studentNo ? box("Student ID", s.studentNo) : ""}
+       <p>Print it on A4 paper and bring it, with your Aadhaar card, to the weigh-in. You can download it again any time after logging in.</p>${loginButton()}`,
     ),
     [s.pdf],
   );

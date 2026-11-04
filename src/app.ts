@@ -14,12 +14,13 @@ import publicRoutes from "./modules/public.routes.js";
 import selfServiceRoutes from "./modules/selfService.routes.js";
 import aadhaarRoutes from "./modules/aadhaar.routes.js";
 import { studentAuthRouter, studentRouter } from "./modules/studentAuth.routes.js";
+import paymentRoutes from "./modules/payments.routes.js";
 
 export function createApp() {
   const app = express();
   app.set("trust proxy", 1); // behind Nginx: req.ip is the real client for rate limiting
   app.use(cors({ origin: env.corsOrigins, exposedHeaders: ["Content-Disposition"] }));
-  app.use(express.json({ limit: "2mb" })); // logo uploads arrive as base64
+  app.use(express.json({ limit: "6mb" })); // logo, photo and document uploads arrive as base64
 
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true });
@@ -43,6 +44,7 @@ export function createApp() {
   admin.use("/tournaments/:id", tournamentDrawsRouter);
   admin.use("/tournaments/:id", certificateRoutes);
   admin.use("/draws", drawsRouter);
+  admin.use("/payments", paymentRoutes);
   app.use("/api", admin);
 
   app.use("/api", (_req, res) => {

@@ -65,7 +65,8 @@ export async function registrationPdf(student: Student): Promise<Attachment> {
     }
   }
   page.drawText(fit(settings.orgName.toUpperCase(), bold, 16, right - textX), { x: textX, y: height - 52, size: 16, font: bold, color: rgb(1, 1, 1) });
-  if (settings.tagline) page.drawText(fit(settings.tagline, sans, 10, right - textX), { x: textX, y: height - 70, size: 10, font: sans, color: rgb(1, 0.93, 0.86) });
+  const sub = [settings.regNo.trim() && `Reg. No. ${settings.regNo.trim()}`, settings.tagline].filter(Boolean).join("  |  ");
+  if (sub) page.drawText(fit(sub, sans, 10, right - textX), { x: textX, y: height - 70, size: 10, font: sans, color: rgb(1, 0.93, 0.86) });
   page.drawText("Registration confirmation", { x: textX, y: height - 92, size: 12, font: bold, color: rgb(1, 1, 1) });
 
   // Student ID
@@ -118,8 +119,8 @@ export async function registrationPdf(student: Student): Promise<Attachment> {
 
   // Footer
   page.drawLine({ start: { x: left, y: 70 }, end: { x: right, y: 70 }, thickness: 0.8, color: LINE });
-  page.drawText(safe(`Issued by ${settings.orgName} on ${date(new Date(), true)} (IST).`), { x: left, y: 54, size: 8, font: sans, color: MUTED });
-  page.drawText("Bring your student ID to every tournament weigh-in. Registration is free.", { x: left, y: 42, size: 8, font: sans, color: MUTED });
+  page.drawText(safe(`Issued by ${settings.orgName}${settings.regNo.trim() ? ` (Reg. No. ${settings.regNo.trim()})` : ""} on ${date(new Date(), true)} (IST).`), { x: left, y: 54, size: 8, font: sans, color: MUTED });
+  page.drawText("Bring your student ID to every tournament weigh-in.", { x: left, y: 42, size: 8, font: sans, color: MUTED });
 
   const bytes = await pdf.save();
   return {

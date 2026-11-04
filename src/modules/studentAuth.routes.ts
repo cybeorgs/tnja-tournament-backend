@@ -12,6 +12,8 @@ import { rateLimit } from "../middleware/rateLimit.js";
 import { accountFromPasswordToken, hashPassword, passwordLink, unusablePasswordHash } from "../lib/accounts.js";
 import { sendPasswordReset } from "../lib/mailer.js";
 import { tempIdOf } from "../lib/registrationEmails.js";
+import { hallTicketPdf, hallTicketReady, loadHallTicket } from "../lib/hallTicket.js";
+import { sendPdf } from "./certificates.js";
 
 const email = z.email("Enter a valid email address").transform((e) => e.trim().toLowerCase());
 const newPassword = z.string().min(8, "Password must be at least 8 characters").max(200);
@@ -99,7 +101,7 @@ studentRouter.get("/me", async (req, res) => {
       registrations: {
         orderBy: { createdAt: "desc" },
         select: {
-          id: true, ageGroup: true, gender: true, weightCategory: true, weightKg: true, placement: true, isLate: true, weighInStatus: true,
+          id: true, ageGroup: true, gender: true, weightCategory: true, weightKg: true, placement: true, weighInStatus: true, fee: true, paymentStatus: true, amountPaid: true, paidAt: true,
           tournament: { select: { id: true, slug: true, title: true, startDate: true, endDate: true, venue: true, city: true, status: true } },
         },
       },
@@ -107,6 +109,17 @@ studentRouter.get("/me", async (req, res) => {
   });
   // Only the last 4 Aadhaar digits leave the server.
   res.json({ email: req.student!.email, students: students.map((s) => ({ ...s, tempId: s.studentNo ? null : tempIdOf(s), aadhaarNumber: s.aadhaarNumber ? `XXXX XXXX ${s.aadhaarNumber.slice(-4)}` : null })) });
+});
+
+/** A hall ticket of one of the account's students, once their entries in the tournament are paid (or free). */
+studentRouter.get("/students/:studentId/hall-tickets/:tournamentId", async (req, res) => {
+  const student = await prisma.student.findFirst({ where: { id: String(req.params.studentId), email: req.student!.email }, select: { id: true } });
+  if (!student) throw notFound("Student");
+  const data = await loadHallTicket(String(req.params.tournamentId), student.id);
+  if (!data) throw notFound("Entry");
+  if (!hallTicketReady(data.entries)) throw new HttpError(409, "Your hall ticket is issued once every entry is paid.");
+  const pdf = await hallTicketPdf(data);
+  sendPdf(res, pdf.content, pdf.filename, req.query.download === "1");
 });
 
 studentRouter.post("/change-password", async (req, res) => {

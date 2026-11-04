@@ -66,6 +66,12 @@ export const studentSchema = z
     club: optional(),
     coachName: optional(),
     belt: optional(40),
+
+    // Additional details (printed on the hall ticket). Weight is required when students register themselves.
+    weightKg: z.union([z.literal("").transform(() => null), z.coerce.number().min(10, "Weight looks too low").max(250, "Weight looks too high")]).nullable().default(null),
+    managerName: optional(),
+    districtPresident: optional(),
+    districtSecretary: optional(),
   });
 
 export type StudentData = z.infer<typeof studentSchema>;
@@ -99,7 +105,7 @@ export async function assertAadhaarFree(tx: Tx | typeof prisma, aadhaarNumber: s
 
 // ─── Documents ───────────────────────────────────────────────────────────────
 
-export const DOCUMENT_KINDS = ["BPL_PROOF", "NATIVITY_PROOF"] as const;
+export const DOCUMENT_KINDS = ["PHOTO", "BPL_PROOF", "NATIVITY_PROOF"] as const;
 export type DocumentKind = (typeof DOCUMENT_KINDS)[number];
 export type StudentUpload = { kind: DocumentKind; label: string; mime: string; data: Uint8Array<ArrayBuffer> };
 
@@ -111,10 +117,11 @@ const MIME_BY_PREFIX: Record<string, string> = {
   "data:application/pdf;base64": "application/pdf",
 };
 
-/** Decode an uploaded data: URL, checking its type and size. */
-export function decodeUpload(dataUrl: string, label: string, maxBytes = 1024 * 1024) {
+/** Decode an uploaded data: URL, checking its type and size. `imageOnly` refuses PDFs (and WEBP, which PDFs can't embed). */
+export function decodeUpload(dataUrl: string, label: string, maxBytes = 1024 * 1024, { imageOnly = false } = {}) {
   const [header, base64] = dataUrl.split(",", 2);
   const mime = MIME_BY_PREFIX[header ?? ""];
+  if (imageOnly && mime !== "image/jpeg" && mime !== "image/png") throw new HttpError(400, `${label} must be a JPG or PNG image.`);
   if (!mime) throw new HttpError(400, `${label} must be a JPG, PNG, WEBP or PDF file.`);
   const data = Uint8Array.from(Buffer.from(base64 || "", "base64"));
   if (data.length === 0) throw new HttpError(400, `${label} is empty.`);
