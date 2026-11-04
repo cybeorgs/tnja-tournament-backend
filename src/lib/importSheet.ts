@@ -62,7 +62,8 @@ export async function readImportSheet<F extends string>(file: Buffer, filename: 
     const header = String(cellValue(cell.value) ?? "").trim();
     if (!header) return;
     const field = headerToField.get(key(header));
-    if (field) columnField.set(col, field);
+    // The first column for a field wins, so an export with both "Age group" and "Category" reads the age group
+    if (field && ![...columnField.values()].includes(field)) columnField.set(col, field);
     else unknown.push(header);
   });
   const found = new Set(columnField.values());
