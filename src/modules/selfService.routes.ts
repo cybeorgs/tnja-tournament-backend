@@ -15,12 +15,14 @@ import { newCertificateNo, param } from "../lib/helpers.js";
 import { confirmResidency, createStudent, decodeUpload, studentSchema, type StudentUpload } from "../lib/students.js";
 import { ensureAccount } from "../lib/accounts.js";
 import { TN_LOCATIONS, lookupPincode } from "../lib/locations.js";
-import { emailRegistrationLater, tempIdOf } from "../lib/registrationEmails.js";
+import { emailRegistrationNow, tempIdOf } from "../lib/registrationEmails.js";
 import { assertEmailVerified, checkEmailOtp, createEmailOtp, createEmailVerifiedToken } from "../lib/emailOtp.js";
 import { sendEmailOtp } from "../lib/mailer.js";
 import { assertAadhaarVerified } from "../lib/aadhaar.js";
-import { closedReason, newEntryTerms } from "../lib/fees.js";
-import { sendHallTicketLater } from "../lib/hallTicket.js";
+import { closedReason, newEntryTerms, repriceEntries } from "../lib/fees.js";
+import { hallTicketPdf, hallTicketReady, loadHallTicket, sendHallTicketLater } from "../lib/hallTicket.js";
+import { confirmPayment, createOrder, createPayToken, readPayToken, verifySchema } from "../lib/payments.js";
+import { sendPdf } from "./certificates.js";
 import { competeAsSchema, resolveCategory } from "./tournaments.routes.js";
 import { refereeSchema } from "./people.routes.js";
 
@@ -103,17 +105,25 @@ router.post("/students/register", registerLimiter, async (req, res) => {
       for (const [i, category] of categories.entries()) {
         await tx.registration.create({ data: { tournamentId: tournament.id, studentId: created.id, ...category, ...tournament.terms, certificateNo: certificateNos[i]! } });
       }
+      // First category at the full fee, further ones at the additional fee.
+      await repriceEntries(tx, tournament.id, created.id);
     }
     return { student: created, account: await ensureAccount(tx, created.email) };
   });
   const entered = tournament && student.status === "APPROVED" ? await studentEntries(tournament.id, student.id) : [];
   // The registration email: username and password (Tamil Nadu: with the registration PDF; others: a temporary ID).
-  emailRegistrationLater(student);
+  // Sent before replying, so the screen can tell the player whether it went (a background send could be
+  // lost, e.g. if the server restarts, with nobody knowing).
+  const loginEmail = await emailRegistrationNow(student);
   // Free tournament: the hall ticket goes out now. Otherwise it is emailed once the entries are paid.
   if (entered.length && tournament) sendHallTicketLater(tournament.id, student.id);
   res.status(201).json({
     status: student.status, studentNo: student.studentNo, tempId: student.studentNo ? null : tempIdOf(student), fullName: student.fullName, email: student.email, newAccount: account.created,
+    /** Whether the username/password email was sent: SENT, FAILED, or NOT_CONFIGURED (no SMTP; written to the server log) */
+    loginEmail,
     entries: entered.map(entryView),
+    // Lets the "you're in" screen pay the entry fee straight away, without logging in.
+    payToken: tournament && entered.some((r) => r.paymentStatus === "PENDING") ? createPayToken(tournament.id, student.id) : null,
   });
 });
 
@@ -207,7 +217,10 @@ router.post("/tournaments/:slug/entry/check", entryLimiter, async (req, res) => 
     genderAllowed: tournament.gender === "BOTH" || student.gender === "OTHER" || tournament.gender === student.gender,
     ageGroups: eligibleAgeGroups(student.dob, tournament.startDate, tournament.ageGroups),
     entryFee: tournament.entryFee,
+    /** Each further category after the player's first */
+    additionalEntryFee: Math.min(tournament.additionalEntryFee, tournament.entryFee),
     entries: (await studentEntries(tournament.id, student.id)).map(entryView),
+    payToken: createPayToken(tournament.id, student.id),
   });
 });
 
@@ -232,10 +245,38 @@ router.post("/tournaments/:slug/entry", entryLimiter, async (req, res) => {
     for (const [i, category] of categories.entries()) {
       await tx.registration.create({ data: { tournamentId: tournament.id, studentId: student.id, ...category, ...tournament.terms, certificateNo: certificateNos[i]! } });
     }
+    await repriceEntries(tx, tournament.id, student.id);
   });
 
   sendHallTicketLater(tournament.id, student.id);
-  res.json({ entries: (await studentEntries(tournament.id, student.id)).map(entryView) });
+  res.json({ entries: (await studentEntries(tournament.id, student.id)).map(entryView), payToken: createPayToken(tournament.id, student.id) });
+});
+
+// ─── Paying the entry fee right after registering ────────────────────────────
+// The pay token from the registration reply names the tournament and student. Paying later works
+// the same way from the student login (studentAuth.routes.ts).
+
+const payLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30 });
+
+router.post("/payments/order", payLimiter, async (req, res) => {
+  const { tournamentId, studentId } = readPayToken(req.body?.payToken);
+  res.json({ order: await createOrder(tournamentId, studentId) });
+});
+
+router.post("/payments/verify", payLimiter, async (req, res) => {
+  const { tournamentId, studentId } = readPayToken(req.body?.payToken);
+  const entries = await confirmPayment(tournamentId, studentId, verifySchema.parse(req.body));
+  res.json({ entries: entries.map(entryView) });
+});
+
+/** The hall ticket, once paid, for the screen the student paid on. */
+router.post("/payments/hall-ticket", payLimiter, async (req, res) => {
+  const { tournamentId, studentId } = readPayToken(req.body?.payToken);
+  const data = await loadHallTicket(tournamentId, studentId);
+  if (!data) throw notFound("Entry");
+  if (!hallTicketReady(data.entries)) throw new HttpError(409, "The hall ticket is issued once every entry is paid.");
+  const pdf = await hallTicketPdf(data);
+  sendPdf(res, pdf.content, pdf.filename, true);
 });
 
 // ─── Referee registration ────────────────────────────────────────────────────

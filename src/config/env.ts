@@ -19,6 +19,9 @@ export const env = {
   /** Public site URL printed on certificates for verification, e.g. https://tournament.example.in */
   publicSiteUrl: process.env.PUBLIC_SITE_URL || "",
   isProduction: process.env.NODE_ENV === "production",
+  /** Razorpay API keys for online entry-fee payments (test keys start rzp_test_). Empty = online payment off. */
+  razorpayKeyId: process.env.RAZORPAY_KEY_ID || "",
+  razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || "",
   smtp: {
     host: process.env.SMTP_HOST || "",
     port: Number(process.env.SMTP_PORT || 587),

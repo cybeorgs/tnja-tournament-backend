@@ -8,7 +8,7 @@ import prisma from "../db.js";
 import { HttpError } from "../middleware/errors.js";
 import { eligibleAgeGroups, type Gender } from "../lib/categories.js";
 import { findTournament, newCertificateNo, param } from "../lib/helpers.js";
-import { closedReason, newEntryTerms } from "../lib/fees.js";
+import { closedReason, newEntryTerms, repriceEntries } from "../lib/fees.js";
 import { digits, key, readImportSheet, str, templateWorkbook, undeliverable, type Cell, type ImportColumn } from "../lib/importSheet.js";
 import { getJob, startJob } from "../lib/importJobs.js";
 import { resolveCategory } from "./tournaments.routes.js";
@@ -182,7 +182,7 @@ router.post("/registrations/import", express.raw({ type: () => true, limit: "5mb
     if (dryRun) {
       return {
         rows: checked.map(summary), valid: valid.length, invalid: checked.length - valid.length,
-        entries: valid.reduce((n, r) => n + r.plan!.categories.length, 0), entryFee: terms.fee, missingColumns, unknownColumns: unknown,
+        entries: valid.reduce((n, r) => n + r.plan!.categories.length, 0), entryFee: tournament.entryFee, additionalEntryFee: Math.min(tournament.additionalEntryFee, tournament.entryFee), missingColumns, unknownColumns: unknown,
       };
     }
 
@@ -199,6 +199,7 @@ router.post("/registrations/import", express.raw({ type: () => true, limit: "5mb
           for (const [i, category] of plan.categories.entries()) {
             await tx.registration.create({ data: { tournamentId: tournament.id, studentId: plan.studentId, ...category, ...terms, certificateNo: certificateNos[i]! } });
           }
+          await repriceEntries(tx, tournament.id, plan.studentId);
         });
         entries += plan.categories.length;
         studentIds.push(plan.studentId);

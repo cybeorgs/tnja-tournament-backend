@@ -35,3 +35,23 @@ export async function emailApproval(student: Student) {
 export function emailRegistrationLater(student: Student) {
   emailRegistration(student).catch((err) => console.error("[registration email] failed:", err));
 }
+
+export type LoginEmailStatus = "SENT" | "FAILED" | "NOT_CONFIGURED";
+
+/**
+ * Send the registration email (username and password) while the player waits, so the screen can say
+ * whether it went. A failed send is tried once more. Never throws: the registration is already saved.
+ */
+export async function emailRegistrationNow(student: Student): Promise<LoginEmailStatus> {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const delivery = await emailRegistration(student);
+      if (delivery.status !== "FAILED") return delivery.status;
+      console.error(`[registration email] attempt ${attempt} to ${student.email} failed: ${delivery.error}`);
+    } catch (err) {
+      console.error(`[registration email] attempt ${attempt} to ${student.email} failed:`, err);
+    }
+    if (attempt === 1) await new Promise((r) => setTimeout(r, 1500));
+  }
+  return "FAILED";
+}

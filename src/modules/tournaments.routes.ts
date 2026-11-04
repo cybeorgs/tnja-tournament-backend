@@ -10,7 +10,7 @@ import { categoryKey, findTournament, newCertificateNo, param, slugify } from ".
 import { ensureAccount } from "../lib/accounts.js";
 import { emailRegistrationLater } from "../lib/registrationEmails.js";
 import { confirmResidency, createStudent, studentSchema } from "../lib/students.js";
-import { closedReason, newEntryTerms } from "../lib/fees.js";
+import { closedReason, newEntryTerms, repriceEntries } from "../lib/fees.js";
 import { hallTicketPdf, hallTicketReady, loadHallTicket, sendHallTicketLater } from "../lib/hallTicket.js";
 import { sendPdf } from "./certificates.js";
 import { DATE, DATE_TIME, maskAadhaar, sendWorkbook, yearAge, type Column } from "../lib/excel.js";
@@ -31,8 +31,10 @@ const tournamentSchema = z
     registrationOpensAt: z.coerce.date({ error: "Registration opening date and time are required" }),
     /** Registration closes here. There is no late registration. */
     registrationClosesAt: z.coerce.date({ error: "Registration closing date and time are required" }),
-    /** Entry fee per entry (age group) in rupees; 0 = free */
+    /** Fee for a player's first category (age group), in rupees; 0 = free */
     entryFee: z.coerce.number({ error: "Enter the entry fee" }).int("Use whole rupees").min(0, "The fee can't be negative").max(100000),
+    /** Fee for each further category the same player enters; at most entryFee */
+    additionalEntryFee: z.coerce.number({ error: "Enter the fee for each additional category" }).int("Use whole rupees").min(0, "The fee can't be negative").max(100000),
     level: z.enum(TOURNAMENT_LEVELS),
     gender: z.enum(["MALE", "FEMALE", "BOTH"]),
     ageGroups: z.array(z.enum(AGE_GROUP_NAMES as [string, ...string[]])).min(1, "Pick at least one age group"),
@@ -43,7 +45,8 @@ const tournamentSchema = z
   // The end date is a date only, so compare whole days (the start has a time of day).
   .refine((t) => !t.endDate || t.endDate.getTime() > t.startDate.getTime() - 24 * 60 * 60 * 1000, { message: "End date cannot be before the start date", path: ["endDate"] })
   .refine((t) => t.registrationOpensAt < t.registrationClosesAt, { message: "Registration must close after it opens", path: ["registrationClosesAt"] })
-  .refine((t) => t.registrationClosesAt <= t.startDate, { message: "Registration must close before the tournament starts", path: ["registrationClosesAt"] });
+  .refine((t) => t.registrationClosesAt <= t.startDate, { message: "Registration must close before the tournament starts", path: ["registrationClosesAt"] })
+  .refine((t) => t.additionalEntryFee <= t.entryFee, { message: "The additional category fee can't be more than the first category fee", path: ["additionalEntryFee"] });
 
 /** Late registration and payment reminders are gone: these old columns always stay empty. */
 const noLate = { lateEntryFee: 0, reminderAt: null };
@@ -112,12 +115,9 @@ router.put("/:id", async (req, res) => {
   }
   const tournament = await prisma.$transaction(async (tx) => {
     const updated = await tx.tournament.update({ where: { id: existing.id }, data: { ...data, ...noLate, endDate: data.endDate ?? null } });
-    if (data.entryFee !== existing.entryFee) {
-      // Unpaid entries owe the new fee (a free tournament owes nothing). Paid entries keep what they paid.
-      await tx.registration.updateMany({
-        where: { tournamentId: existing.id, paymentStatus: "PENDING" },
-        data: data.entryFee > 0 ? { fee: data.entryFee } : { fee: 0, paymentStatus: "WAIVED" },
-      });
+    if (data.entryFee !== existing.entryFee || data.additionalEntryFee !== existing.additionalEntryFee) {
+      // Unpaid entries owe the new fees (first category full, the rest the additional fee). Paid entries keep what they paid.
+      await repriceEntries(tx, existing.id);
     }
     return updated;
   });
@@ -309,14 +309,13 @@ router.post("/:id/registrations", async (req, res) => {
       studentId = created.id;
       createdStudent = created;
     }
-    const saved = [];
+    const ids = [];
     for (const [i, category] of categories.entries()) {
-      saved.push(await tx.registration.create({
-        data: { tournamentId: tournament.id, studentId, ...category, ...terms, certificateNo: certificateNos[i]! },
-        include: { student: true },
-      }));
+      ids.push((await tx.registration.create({ data: { tournamentId: tournament.id, studentId, ...category, ...terms, certificateNo: certificateNos[i]! } })).id);
     }
-    return saved;
+    // The player's first category pays the full fee, further ones the additional fee.
+    await repriceEntries(tx, tournament.id, studentId);
+    return tx.registration.findMany({ where: { id: { in: ids } }, include: { student: true }, orderBy: { createdAt: "asc" } });
   });
   // A student created here gets the registration email (username, password, PDF). In a free
   // tournament the hall ticket is emailed now; otherwise once the entries are paid.
@@ -437,6 +436,8 @@ router.delete("/:id/registrations/:regId", async (req, res) => {
     throw new HttpError(409, "This student is already in a draw. Delete that category's draw before removing them.");
   }
   await prisma.registration.delete({ where: { id: regId } });
+  // Removing the first category moves the full fee to the player's next unpaid entry.
+  await repriceEntries(prisma, tournamentId, existing.studentId);
   res.json({ message: "Registration removed." });
 });
 

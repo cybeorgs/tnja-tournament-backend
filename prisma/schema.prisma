@@ -57,8 +57,10 @@ model Tournament {
   gender           String    @default("BOTH")
   /// Age groups contested, e.g. ["Sub-Junior", "Cadet"]
   ageGroups        String[]
-  /// Regular entry fee (registrationOpensAt → registrationClosesAt)
+  /// Fee for a player's first category (age group) in the tournament
   entryFee         Int       @default(0)
+  /// Fee for each further category the same player enters (at most entryFee; 0 = extra categories free)
+  additionalEntryFee Int     @default(0)
   /// Late entry fee set by the admin, higher than entryFee (registrationClosesAt → startDate)
   lateEntryFee     Int       @default(0)
   numberOfMats     Int       @default(1)

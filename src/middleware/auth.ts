@@ -1,6 +1,8 @@
 import type { NextFunction, Request, Response } from "express";
+import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env.js";
+import prisma from "../db.js";
 
 export interface AuthPayload {
   adminId: string;
@@ -12,7 +14,13 @@ export interface StudentAuthPayload {
   kind: "student";
   accountId: string;
   email: string;
+  /** Fingerprint of the password hash at login: changing or resetting the password ends every older session. */
+  pv?: string;
 }
+
+/** Short fingerprint of a password hash, carried in student tokens (the hash itself never leaves the server). */
+export const passwordVersion = (passwordHash: string) =>
+  crypto.createHmac("sha256", env.jwtSecret).update(`session:${passwordHash}`).digest("hex").slice(0, 16);
 
 declare global {
   namespace Express {
@@ -29,8 +37,10 @@ export function signToken(payload: AuthPayload): string {
   return jwt.sign(payload, env.jwtSecret, { expiresIn });
 }
 
-export function signStudentToken(payload: Omit<StudentAuthPayload, "kind">): string {
-  return jwt.sign({ ...payload, kind: "student" }, env.jwtSecret, { expiresIn });
+/** A session for the account, tied to its current password (see passwordVersion). */
+export function signStudentToken(account: { id: string; email: string; passwordHash: string }): string {
+  const payload: StudentAuthPayload = { kind: "student", accountId: account.id, email: account.email, pv: passwordVersion(account.passwordHash) };
+  return jwt.sign(payload, env.jwtSecret, { expiresIn });
 }
 
 function bearer(req: Request) {
@@ -52,15 +62,28 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction) {
   }
 }
 
-export function requireStudent(req: Request, res: Response, next: NextFunction) {
+/**
+ * A valid student session: signed, not expired, and issued since the password was last changed or
+ * reset (so a stolen or old session stops working then). The account's current email is used.
+ */
+export async function requireStudent(req: Request, res: Response, next: NextFunction) {
   const token = bearer(req);
   if (!token) return res.status(401).json({ error: "Please log in." });
+  let decoded: Partial<StudentAuthPayload>;
   try {
-    const decoded = jwt.verify(token, env.jwtSecret) as Partial<StudentAuthPayload>;
-    if (decoded.kind !== "student" || !decoded.accountId || !decoded.email) throw new Error("Not a student token");
-    req.student = { kind: "student", accountId: decoded.accountId, email: decoded.email };
-    next();
+    decoded = jwt.verify(token, env.jwtSecret) as Partial<StudentAuthPayload>;
+    if (decoded.kind !== "student" || !decoded.accountId || !decoded.pv) throw new Error("Not a student token");
   } catch {
     return res.status(401).json({ error: "Your session has expired. Please log in again." });
+  }
+  try {
+    const account = await prisma.studentAccount.findUnique({ where: { id: decoded.accountId }, select: { id: true, email: true, passwordHash: true } });
+    if (!account || passwordVersion(account.passwordHash) !== decoded.pv) {
+      return res.status(401).json({ error: "Your password was changed, so you've been logged out. Please log in again." });
+    }
+    req.student = { kind: "student", accountId: account.id, email: account.email };
+    next();
+  } catch (err) {
+    next(err);
   }
 }
