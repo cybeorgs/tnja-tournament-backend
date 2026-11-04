@@ -1,6 +1,7 @@
 // ─── Excel (.xlsx) downloads ─────────────────────────────────────────────────
 import ExcelJS from "exceljs";
 import type { Response } from "express";
+import { competitionAge } from "./categories.js";
 
 export interface Column<T> {
   header: string;
@@ -63,4 +64,5 @@ export const DATE = "dd-mm-yyyy";
 export const DATE_TIME = "dd-mm-yyyy hh:mm";
 
 /** Age as the federation counts it: tournament (or current) year − birth year */
-export const yearAge = (dob: Date, on = new Date()) => on.getFullYear() - dob.getFullYear();
+/** Age by birth year only (the year of `on` in India minus the birth year), as categories use. */
+export const yearAge = (dob: Date, on = new Date()) => competitionAge(dob, on);

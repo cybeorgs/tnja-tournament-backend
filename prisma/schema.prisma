@@ -95,7 +95,7 @@ model Student {
   fatherName       String   @default("")
   motherName       String   @default("")
   dob              DateTime
-  /// MALE | FEMALE | OTHER (OTHER chooses boys' or girls' categories per tournament)
+  /// MALE | FEMALE. (Older records may be OTHER: they choose boys' or girls' categories per tournament.)
   gender           String
   club             String   @default("")
   /// Residing / studying district
@@ -109,6 +109,10 @@ model Student {
   /// 12 digits; unique so one person can't hold two student IDs
   aadhaarNumber    String?  @unique
   alternatePhone   String   @default("")
+  /// Parent or guardian's mobile (printed on the registration PDF and hall ticket)
+  parentPhone      String   @default("")
+  /// Who to call in an emergency
+  emergencyPhone   String   @default("")
   /// Lower-case. Students sharing an email (e.g. siblings) share one StudentAccount login.
   email            String   @default("")
   nationality      String   @default("")

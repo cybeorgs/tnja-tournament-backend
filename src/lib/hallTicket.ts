@@ -153,6 +153,7 @@ export async function hallTicketPdf({ tournament: t, student: s, entries, photo 
     ["Student ID", s.studentNo ?? "-"], ["Date of birth", day(s.dob)],
     ["Gender", GENDER[s.gender] ?? s.gender], ["Blood group", s.bloodGroup],
     ["Father's name", s.fatherName], ["Mobile", s.phone],
+    ["Parent's mobile", s.parentPhone], ["Emergency contact", s.emergencyPhone],
     ["District", s.district], ["Club / academy", s.club],
   ];
   text(page, "PLAYER", left, y, 9, bold, BRAND);
@@ -161,7 +162,7 @@ export async function hallTicketPdf({ tournament: t, student: s, entries, photo 
   for (let i = 0; i < details.length; i += 2) {
     field(details[i]![0], details[i]![1], left, dy, colW);
     if (details[i + 1]) field(details[i + 1]![0], details[i + 1]![1], left + colW + 12, dy, colW);
-    dy -= 26;
+    dy -= 24;
   }
   y = Math.min(dy + 4, photoTop - photoH) - 16;
 
@@ -224,10 +225,10 @@ export async function hallTicketPdf({ tournament: t, student: s, entries, photo 
   };
   blank("Weight at weigh-in (kg)", left, halfW);
   blank("Weigh-in date & time", left + halfW + 16, halfW);
-  y -= 24;
+  y -= 22;
   blank("Weight class confirmed", left, halfW);
   blank("Chest / bib no.", left + halfW + 16, halfW);
-  y -= 24;
+  y -= 22;
   blank("Remarks", left, inner);
   y -= 20;
   page.drawLine({ start: { x: left, y: y - 3 }, end: { x: right, y: y - 3 }, thickness: 0.6, color: MUTED });
@@ -236,7 +237,7 @@ export async function hallTicketPdf({ tournament: t, student: s, entries, photo 
   // ── Signatures ──
   const signers = ["Player", "Coach / Manager", "District Secretary (seal)", "Weigh-in Official"];
   const boxW = (inner - 12 * (signers.length - 1)) / signers.length;
-  const boxH = 54;
+  const boxH = 46;
   signers.forEach((label, i) => {
     const x = left + i * (boxW + 12);
     page.drawRectangle({ x, y: y - boxH, width: boxW, height: boxH, borderColor: LINE, borderWidth: 0.8 });

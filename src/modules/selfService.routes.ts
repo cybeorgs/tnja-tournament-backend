@@ -67,13 +67,17 @@ const registerSchema = studentSchema.and(
       })
       .optional(),
   }),
-).refine((r) => r.weightKg !== null, { message: "Enter the player's weight", path: ["weightKg"] });
+)
+  .refine((r) => r.weightKg !== null, { message: "Enter the player's weight", path: ["weightKg"] })
+  .refine((r) => !!r.parentPhone, { message: "Enter the parent's mobile number", path: ["parentPhone"] })
+  .refine((r) => !!r.emergencyPhone, { message: "Enter an emergency contact number", path: ["emergencyPhone"] });
 
 router.post("/students/register", registerLimiter, async (req, res) => {
   const { agreedToTerms: _agreed, emailVerificationToken, aadhaarVerificationToken, photo, bplProof, nativityProof, nativityProofLabel, entry, ...form } = registerSchema.parse(req.body);
   assertEmailVerified(emailVerificationToken, form.email);
   assertAadhaarVerified(aadhaarVerificationToken, form.aadhaarNumber, form.residingPincode, form.dob);
-  const data = await confirmResidency(form);
+  // Coach, manager, district president and secretary are set by the admin only: whatever a player sends is ignored.
+  const data = await confirmResidency({ ...form, coachName: "", managerName: "", districtPresident: "", districtSecretary: "" });
 
   const documents: StudentUpload[] = [{ kind: "PHOTO", label: "Passport photo", ...decodeUpload(photo, "The photograph", 1024 * 1024, { imageOnly: true }) }];
   if (data.outsideTamilNadu) {

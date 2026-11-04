@@ -36,13 +36,16 @@ export const studentSchema = z
     fullName: name("Full name"),
     fatherName: name("Father's name"),
     motherName: name("Mother's name"),
-    /** OTHER students pick boys' or girls' categories when they enter a tournament (competeAs). */
-    gender: z.enum(["MALE", "FEMALE", "OTHER"], { error: "Choose the gender" }),
+    /** Male or female only. (Older records may still be OTHER; they pick boys' or girls' categories per tournament.) */
+    gender: z.enum(["MALE", "FEMALE"], { error: "Choose male or female" }),
     dob: z.coerce.date({ error: "Date of birth is required" }).refine((d) => d <= threeYearsAgo(), "Student must be at least 3 years old"),
     bloodGroup: z.enum(BLOOD_GROUPS, { error: "Choose the blood group" }),
     aadhaarNumber: z.string().trim().regex(/^\d{12}$/, "Aadhaar number must be 12 digits"),
     phone: mobile,
     alternatePhone: z.union([z.literal(""), mobile]).default(""),
+    /** Required when players register themselves (see selfService.routes.ts) */
+    parentPhone: z.union([z.literal(""), z.string().trim().regex(/^[6-9]\d{9}$/, "Enter a valid 10-digit parent's mobile number")]).default(""),
+    emergencyPhone: z.union([z.literal(""), z.string().trim().regex(/^[6-9]\d{9}$/, "Enter a valid 10-digit emergency contact number")]).default(""),
     email: z.email("Enter a valid email address").max(254).transform((e) => e.trim().toLowerCase()),
     nationality: name("Nationality"),
 

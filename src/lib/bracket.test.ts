@@ -106,14 +106,15 @@ test("changing a result moves the new winner on; undo is blocked once the next m
 
 test("age groups follow birth year relative to the tournament year", () => {
   const all = ["Sub-Junior", "Cadet", "Junior", "Senior"];
-  assert.deepEqual(eligibleAgeGroups(new Date("2012-05-01"), new Date("2026-11-20"), all), ["Sub-Junior"]);
-  assert.deepEqual(eligibleAgeGroups(new Date("2009-05-01"), new Date("2026-11-20"), all), ["Cadet", "Junior", "Senior"]);
-  // Cadet 15–17 → Cadet, Junior, Senior · Junior 18–20 → Junior, Senior · Senior 21+ → Senior
+  assert.deepEqual(eligibleAgeGroups(new Date("2013-05-01"), new Date("2026-11-20"), all), ["Sub-Junior"]);
+  assert.deepEqual(eligibleAgeGroups(new Date("2010-05-01"), new Date("2026-11-20"), all), ["Cadet", "Junior", "Senior"]);
+  // Cadet 14–16 (Junior from 14, Senior from 15) · Junior 17–19 → Junior, Senior · Senior 20+ → Senior
   const at = (age: number) => eligibleAgeGroups(new Date(`${2026 - age}-05-01`), new Date("2026-11-20"), all);
+  assert.deepEqual(at(14), ["Sub-Junior", "Cadet", "Junior"]);
   assert.deepEqual(at(15), ["Cadet", "Junior", "Senior"]);
-  assert.deepEqual(at(18), ["Junior", "Senior"]);
-  assert.deepEqual(at(20), ["Junior", "Senior"]);
-  assert.deepEqual(at(21), ["Senior"]);
+  assert.deepEqual(at(17), ["Junior", "Senior"]);
+  assert.deepEqual(at(19), ["Junior", "Senior"]);
+  assert.deepEqual(at(20), ["Senior"]);
   assert.deepEqual(at(40), ["Senior"]);
   // Only the groups the tournament contests are offered
   assert.deepEqual(eligibleAgeGroups(new Date("2011-05-01"), new Date("2026-11-20"), ["Junior", "Senior"]), ["Junior", "Senior"]);

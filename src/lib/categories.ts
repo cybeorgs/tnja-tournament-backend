@@ -1,7 +1,10 @@
 // ─── Age groups and weight classes ───────────────────────────────────────────
-// Ported from the main TNJA app. Age is counted as (tournament year − birth year),
-// which is how the federation's birth-year bands work, so the same table stays
-// valid every season instead of hard-coding birth years.
+// Categories go by BIRTH YEAR only: the month and day of birth never matter. Age is counted as
+// (tournament year − birth year), so the same table stays valid every season instead of
+// hard-coding birth years. For a 2026 tournament this gives (TNJA circular):
+//   Mini Sub-Junior I 2019–2020 · II 2017–2018 · III 2015–2016 · Sub-Junior 2012–2014
+//   Cadet 2010–2012 · Junior 2007–2009 (cadets 2010–2012 may play up) · Senior 2006 and earlier
+//   (players born 2011 and earlier may play up)
 
 export interface AgeGroupDef {
   name: string;
@@ -20,10 +23,10 @@ export const AGE_GROUPS: AgeGroupDef[] = [
   { name: "Mini Sub-Junior Age Group 2", minAge: 8, maxAge: 9, weights: { MALE: [25, 30, 35], FEMALE: [22, 26, 30] } },
   { name: "Mini Sub-Junior Age Group 3", minAge: 10, maxAge: 11, weights: { MALE: [30, 35, 40, 45], FEMALE: [28, 32, 36, 40] } },
   { name: "Sub-Junior", minAge: 12, maxAge: 14, weights: { MALE: [30, 35, 40, 45, 50, 55, 60, 66], FEMALE: [28, 32, 36, 40, 44, 48, 52, 57] } },
-  // Cadets (15–17) may enter Cadet, Junior and Senior; juniors (18–20) Junior and Senior; seniors (21+) Senior only.
-  { name: "Cadet", minAge: 15, maxAge: 17, weights: { MALE: [50, 55, 60, 66, 73, 81, 90], FEMALE: [40, 44, 48, 52, 57, 63, 70] } },
-  { name: "Junior", minAge: 18, maxAge: 20, playUpFrom: 15, weights: { MALE: [55, 60, 66, 73, 81, 90, 100], FEMALE: [44, 48, 52, 57, 63, 70, 78] } },
-  { name: "Senior", minAge: 21, maxAge: 120, playUpFrom: 15, weights: { MALE: [60, 66, 73, 81, 90, 100], FEMALE: [48, 52, 57, 63, 70, 78] } },
+  // Cadets (14–16) may also enter Junior (from 14) and Senior (from 15); juniors (17–19) Junior and Senior; seniors (20+) Senior only.
+  { name: "Cadet", minAge: 14, maxAge: 16, weights: { MALE: [50, 55, 60, 66, 73, 81, 90], FEMALE: [40, 44, 48, 52, 57, 63, 70] } },
+  { name: "Junior", minAge: 17, maxAge: 19, playUpFrom: 14, weights: { MALE: [55, 60, 66, 73, 81, 90, 100], FEMALE: [44, 48, 52, 57, 63, 70, 78] } },
+  { name: "Senior", minAge: 20, maxAge: 120, playUpFrom: 15, weights: { MALE: [60, 66, 73, 81, 90, 100], FEMALE: [48, 52, 57, 63, 70, 78] } },
 ];
 
 /** True when a player of competition age `age` may enter `group` (its own ages, or playing up). */
@@ -39,8 +42,15 @@ export function findAgeGroup(name: string): AgeGroupDef | undefined {
   return AGE_GROUPS.find((g) => g.name === name);
 }
 
+/** Birth year as entered: dates of birth are stored as midnight UTC, so read the UTC year (never the server's time zone). */
+export const birthYear = (dob: Date) => dob.getUTCFullYear();
+
+/** The calendar year of a moment in India (a tournament starting 1 Jan 00:30 IST is that new year). */
+export const yearInIndia = (d: Date) => Number(d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", year: "numeric" }));
+
+/** Tournament year − birth year. Month and day of birth are ignored. */
 export function competitionAge(dob: Date, tournamentDate: Date): number {
-  return tournamentDate.getFullYear() - dob.getFullYear();
+  return yearInIndia(tournamentDate) - birthYear(dob);
 }
 
 /** Age groups (out of `allowed`) a student born on `dob` may enter for a tournament on `tournamentDate`. */

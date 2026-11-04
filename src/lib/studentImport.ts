@@ -24,6 +24,8 @@ export const IMPORT_COLUMNS: ImportColumn<Field>[] = [
   { field: "aadhaarNumber", header: "Aadhaar Number", required: true, aliases: ["aadhaar", "aadhar", "aadharnumber", "aadhaarno"], note: "12 digits; one student per Aadhaar", example: "123412341234" },
   { field: "phone", header: "Mobile Number", required: true, aliases: ["mobile", "phone", "phonenumber", "mobileno", "contactnumber"], note: "10 digits", example: "9876543210" },
   { field: "alternatePhone", header: "Alternate Mobile", required: false, aliases: ["alternatephone", "alternatenumber", "alternatemobilenumber"], note: "", example: "" },
+  { field: "parentPhone", header: "Parent Mobile", required: false, aliases: ["parentphone", "parentnumber", "parentsmobile", "parentmobilenumber", "guardianmobile"], note: "", example: "" },
+  { field: "emergencyPhone", header: "Emergency Contact", required: false, aliases: ["emergencyphone", "emergencynumber", "emergencymobile", "emergencycontactnumber"], note: "", example: "" },
   { field: "email", header: "Email", required: true, aliases: ["emailid", "emailaddress", "mail"], note: "The login is sent here; siblings may share one", example: "arun@example.com" },
   { field: "residingPincode", header: "Residing Pincode", required: false, aliases: ["residingpin"], note: "Where they live / study; defaults to Pincode", example: "600002" },
   { field: "district", header: "District", required: true, aliases: ["districtname"], note: "Tamil Nadu: as in the district list", example: "Chennai" },
@@ -106,6 +108,8 @@ function toInput(values: Partial<Record<Field, Cell>>) {
     aadhaarNumber: digits(v.aadhaarNumber),
     phone: digits(v.phone).replace(/^(91|0)(?=\d{10}$)/, ""),
     alternatePhone: digits(v.alternatePhone).replace(/^(91|0)(?=\d{10}$)/, ""),
+    parentPhone: digits(v.parentPhone).replace(/^(91|0)(?=\d{10}$)/, ""),
+    emergencyPhone: digits(v.emergencyPhone).replace(/^(91|0)(?=\d{10}$)/, ""),
     email: str(v.email),
     residingPincode: digits(v.residingPincode) || pincode,
     outsideTamilNadu: false, // decided from the pincode by confirmResidency

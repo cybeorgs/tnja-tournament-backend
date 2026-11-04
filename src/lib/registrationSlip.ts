@@ -5,7 +5,7 @@
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 import type { Student } from "@prisma/client";
 import { getSettings } from "./helpers.js";
-import { AGE_GROUPS, eligibleAgeGroups, AGE_GROUP_NAMES } from "./categories.js";
+import { AGE_GROUPS, eligibleAgeGroups, AGE_GROUP_NAMES, competitionAge } from "./categories.js";
 import type { Attachment } from "./mailer.js";
 
 const INK = rgb(0.06, 0.09, 0.16);
@@ -78,7 +78,7 @@ export async function registrationPdf(student: Student): Promise<Attachment> {
   page.drawText(`Status: ${student.status === "APPROVED" ? "Registered" : student.status === "PENDING" ? "Waiting for approval" : "Not approved"}`, { x: right - 170, y: y - 36, size: 10, font: sans, color: MUTED });
   y -= 62;
 
-  const age = new Date().getFullYear() - student.dob.getFullYear();
+  const age = competitionAge(student.dob, new Date());
   const own = AGE_GROUPS.find((g) => age >= g.minAge && age <= g.maxAge)?.name ?? "";
   const canPlay = eligibleAgeGroups(student.dob, new Date(), AGE_GROUP_NAMES).join(", ");
   const sections: [string, [string, string][]][] = [
@@ -88,7 +88,11 @@ export async function registrationPdf(student: Student): Promise<Attachment> {
       ["Father's name", student.fatherName], ["Mother's name", student.motherName], ["Blood group", student.bloodGroup],
       ["Aadhaar", student.aadhaarNumber ? `XXXX XXXX ${student.aadhaarNumber.slice(-4)}` : "-"], ["Nationality", student.nationality],
     ]],
-    ["Contact", [["Mobile", student.phone], ["Alternate mobile", student.alternatePhone || "-"], ["Email (username)", student.email]]],
+    ["Contact", [
+      ["Mobile", student.phone], ["Alternate mobile", student.alternatePhone || "-"],
+      ["Parent's mobile", student.parentPhone || "-"], ["Emergency contact", student.emergencyPhone || "-"],
+      ["Email (username)", student.email],
+    ]],
     ["Address", [
       ["Address", student.address], ["City", student.city], ["District", student.district], ["Taluk", student.taluk || "-"],
       ["State", student.state], ["Pincode", student.pincode], ["Residing pincode", student.residingPincode],
