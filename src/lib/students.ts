@@ -43,8 +43,8 @@ export const studentSchema = z
     aadhaarNumber: z.string().trim().regex(/^\d{12}$/, "Aadhaar number must be 12 digits"),
     phone: mobile,
     alternatePhone: z.union([z.literal(""), mobile]).default(""),
-    /** Required when players register themselves (see selfService.routes.ts) */
-    parentPhone: z.union([z.literal(""), z.string().trim().regex(/^[6-9]\d{9}$/, "Enter a valid 10-digit parent's mobile number")]).default(""),
+    /** Parent's mobile, which is also the emergency contact (confirmResidency keeps the two equal). Required when players register themselves. */
+    parentPhone: z.union([z.literal(""), z.string().trim().regex(/^[6-9]\d{9}$/, "Enter a valid 10-digit parent / emergency contact number")]).default(""),
     emergencyPhone: z.union([z.literal(""), z.string().trim().regex(/^[6-9]\d{9}$/, "Enter a valid 10-digit emergency contact number")]).default(""),
     email: z.email("Enter a valid email address").max(254).transform((e) => e.trim().toLowerCase()),
     nationality: name("Nationality"),
@@ -84,7 +84,10 @@ export type StudentData = z.infer<typeof studentSchema>;
  * the form (if the lookup service is down, the form's answer is kept). Tamil Nadu residents must
  * pick a district and taluk from the list.
  */
-export async function confirmResidency<T extends { residingPincode: string; outsideTamilNadu: boolean; isBPL: boolean; district: string; taluk: string }>(data: T): Promise<T> {
+export async function confirmResidency<T extends { residingPincode: string; outsideTamilNadu: boolean; isBPL: boolean; district: string; taluk: string; parentPhone: string; emergencyPhone: string }>(data: T): Promise<T> {
+  // One number: the parent's mobile is the emergency contact (whichever was given fills both).
+  const contact = data.parentPhone || data.emergencyPhone;
+  data = { ...data, parentPhone: contact, emergencyPhone: contact };
   let outside = data.outsideTamilNadu;
   try {
     outside = !(await lookupPincode(data.residingPincode)).inTamilNadu;

@@ -153,8 +153,8 @@ export async function hallTicketPdf({ tournament: t, student: s, entries, photo 
     ["Student ID", s.studentNo ?? "-"], ["Date of birth", day(s.dob)],
     ["Gender", GENDER[s.gender] ?? s.gender], ["Blood group", s.bloodGroup],
     ["Father's name", s.fatherName], ["Mobile", s.phone],
-    ["Parent's mobile", s.parentPhone], ["Emergency contact", s.emergencyPhone],
-    ["District", s.district], ["Club / academy", s.club],
+    ["Parent / emergency", s.parentPhone || s.emergencyPhone], ["District", s.district],
+    ["Club / academy", s.club], ["Belt", s.belt],
   ];
   text(page, "PLAYER", left, y, 9, bold, BRAND);
   text(page, fit(s.fullName.toUpperCase(), bold, 15, detailsW), left, y - 18, 15, bold);
@@ -200,7 +200,7 @@ export async function hallTicketPdf({ tournament: t, student: s, entries, photo 
   const extra: [string, string][] = [
     ["Weight (kg)", s.weightKg ? `${s.weightKg} kg` : ""], ["Coach name", s.coachName],
     ["Manager name", s.managerName], ["District president", s.districtPresident],
-    ["District secretary", s.districtSecretary], ["Belt", s.belt],
+    ["District secretary", s.districtSecretary],
   ];
   const halfW = (inner - 16) / 2;
   for (let i = 0; i < extra.length; i += 2) {

@@ -89,8 +89,7 @@ export async function registrationPdf(student: Student): Promise<Attachment> {
       ["Aadhaar", student.aadhaarNumber ? `XXXX XXXX ${student.aadhaarNumber.slice(-4)}` : "-"], ["Nationality", student.nationality],
     ]],
     ["Contact", [
-      ["Mobile", student.phone], ["Alternate mobile", student.alternatePhone || "-"],
-      ["Parent's mobile", student.parentPhone || "-"], ["Emergency contact", student.emergencyPhone || "-"],
+      ["Mobile", student.phone], ["Parent / emergency contact", student.parentPhone || student.emergencyPhone || "-"],
       ["Email (username)", student.email],
     ]],
     ["Address", [

@@ -69,8 +69,7 @@ const registerSchema = studentSchema.and(
   }),
 )
   .refine((r) => r.weightKg !== null, { message: "Enter the player's weight", path: ["weightKg"] })
-  .refine((r) => !!r.parentPhone, { message: "Enter the parent's mobile number", path: ["parentPhone"] })
-  .refine((r) => !!r.emergencyPhone, { message: "Enter an emergency contact number", path: ["emergencyPhone"] });
+  .refine((r) => !!r.parentPhone, { message: "Enter the parent / emergency contact number", path: ["parentPhone"] });
 
 router.post("/students/register", registerLimiter, async (req, res) => {
   const { agreedToTerms: _agreed, emailVerificationToken, aadhaarVerificationToken, photo, bplProof, nativityProof, nativityProofLabel, entry, ...form } = registerSchema.parse(req.body);
