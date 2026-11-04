@@ -56,3 +56,12 @@ test("free additional categories are waived", async () => {
   await repriceEntries(fakeDb({ entryFee: 500, additionalEntryFee: 0 }, rows), "t", "A");
   assert.deepEqual(rows.map((r) => [r.fee, r.paymentStatus]), [[500, "PENDING"], [0, "WAIVED"]]);
 });
+
+test("an entry made free by a 0 fee owes the fee again when one is set", async () => {
+  const rows: Row[] = [
+    { id: "a1", studentId: "A", fee: 2, paymentStatus: "PENDING" },
+    { id: "a2", studentId: "A", fee: 0, paymentStatus: "WAIVED" },
+  ];
+  await repriceEntries(fakeDb({ entryFee: 2, additionalEntryFee: 1 }, rows), "t");
+  assert.deepEqual(rows.map((r) => [r.fee, r.paymentStatus]), [[2, "PENDING"], [1, "PENDING"]]);
+});

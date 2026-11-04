@@ -19,6 +19,9 @@ const router = Router();
 
 // ─── Tournaments ─────────────────────────────────────────────────────────────
 
+/** An empty box is "not entered", not 0 (coercing "" would quietly make a fee free). */
+const blankToUndefined = (v: unknown) => (v === "" || v === null ? undefined : v);
+
 const tournamentSchema = z
   .object({
     title: z.string().trim().min(3, "Title is required").max(150),
@@ -32,9 +35,9 @@ const tournamentSchema = z
     /** Registration closes here. There is no late registration. */
     registrationClosesAt: z.coerce.date({ error: "Registration closing date and time are required" }),
     /** Fee for a player's first category (age group), in rupees; 0 = free */
-    entryFee: z.coerce.number({ error: "Enter the entry fee" }).int("Use whole rupees").min(0, "The fee can't be negative").max(100000),
+    entryFee: z.preprocess(blankToUndefined, z.coerce.number({ error: "Enter the first category fee" }).int("Use whole rupees").min(0, "The fee can't be negative").max(100000)),
     /** Fee for each further category the same player enters; at most entryFee */
-    additionalEntryFee: z.coerce.number({ error: "Enter the fee for each additional category" }).int("Use whole rupees").min(0, "The fee can't be negative").max(100000),
+    additionalEntryFee: z.preprocess(blankToUndefined, z.coerce.number({ error: "Enter the fee for each additional category" }).int("Use whole rupees").min(0, "The fee can't be negative").max(100000)),
     level: z.enum(TOURNAMENT_LEVELS),
     gender: z.enum(["MALE", "FEMALE", "BOTH"]),
     ageGroups: z.array(z.enum(AGE_GROUP_NAMES as [string, ...string[]])).min(1, "Pick at least one age group"),

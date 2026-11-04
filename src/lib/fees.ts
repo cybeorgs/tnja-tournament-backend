@@ -42,9 +42,9 @@ type Db = Prisma.TransactionClient | typeof prisma;
 export const feeFor = (t: Fees, isFirst: boolean) => (isFirst ? t.entryFee : Math.min(t.additionalEntryFee, t.entryFee));
 
 /**
- * Bring a player's unpaid entries in a tournament to the right fee: the earliest entry is the first
- * category (full fee), the others pay the additional fee. Paid entries keep what they paid; an unpaid
- * entry whose fee comes to 0 becomes WAIVED. Pass studentId to do one player, or leave it out for all.
+ * Bring a player's entries in a tournament to the current fees: the earliest entry is the first
+ * category (full fee), the others pay the additional fee. Paid entries keep what they paid; any other
+ * entry is PENDING when it has a fee and WAIVED when it comes to 0 (and back again if a fee is set). Pass studentId to do one player, or leave it out for all.
  */
 export async function repriceEntries(db: Db, tournamentId: string, studentId?: string) {
   const tournament = await db.tournament.findUnique({ where: { id: tournamentId }, select: { entryFee: true, additionalEntryFee: true } });
@@ -58,13 +58,16 @@ export async function repriceEntries(db: Db, tournamentId: string, studentId?: s
   for (const e of entries) {
     const isFirst = !seen.has(e.studentId);
     seen.add(e.studentId);
-    if (e.paymentStatus !== "PENDING") continue;
+    // Paid entries keep what they paid. Every other entry follows the current fees: an entry that was
+    // free (fee 0) owes the fee again if one is set later, and an unpaid one becomes free at 0.
+    if (e.paymentStatus === "PAID") continue;
     const fee = feeFor(tournament, isFirst);
-    if (fee === e.fee && fee > 0) continue;
+    const status = fee > 0 ? "PENDING" : "WAIVED";
+    if (fee === e.fee && status === e.paymentStatus) continue;
     await db.registration.update({
       where: { id: e.id },
       // The payment order (if any) is kept: an order already paid is still matched; a new order uses the new fee.
-      data: fee > 0 ? { fee } : { fee: 0, paymentStatus: "WAIVED" },
+      data: { fee, paymentStatus: status },
     });
   }
 }
