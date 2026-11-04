@@ -8,6 +8,7 @@ import {
 import type { Entrant } from "../lib/bracket.js";
 import { categoryKey, findTournament, newCertificateNo, param, slugify } from "../lib/helpers.js";
 import { ensureAccount } from "../lib/accounts.js";
+import { adminActor } from "../lib/audit.js";
 import { emailRegistrationLater } from "../lib/registrationEmails.js";
 import { confirmResidency, createStudent, studentSchema } from "../lib/students.js";
 import { closedReason, newEntryTerms, repriceEntries } from "../lib/fees.js";
@@ -308,7 +309,7 @@ router.post("/:id/registrations", async (req, res) => {
   const registrations = await prisma.$transaction(async (tx) => {
     let studentId = input.studentId;
     if (!studentId) {
-      const created = await createStudent(tx, newStudent!);
+      const created = await createStudent(tx, newStudent!, { actor: adminActor(req) });
       await ensureAccount(tx, created.email);
       studentId = created.id;
       createdStudent = created;

@@ -308,3 +308,29 @@ model EmailLog {
   @@index([tournamentId, createdAt])
   @@index([tournamentId, studentId])
 }
+
+/// Permanent, append-only history of every change to a student record: who did it, when, and what
+/// changed. The database refuses UPDATE, DELETE and TRUNCATE on this table (a trigger, see the
+/// migration), so no one — not even an admin or the app itself — can edit or remove an entry.
+model StudentAuditLog {
+  id          String   @id @default(uuid())
+  /// Not a foreign key: the history outlives the student record (deletions are logged too).
+  studentId   String
+  studentNo   String?
+  studentName String
+  /// CREATED | UPDATED | APPROVED | REJECTED | DELETED
+  action      String
+  /// ADMIN | STUDENT (registered themselves) | IMPORT (admin spreadsheet import)
+  actorType   String
+  /// Admin username, or the email the student registered with
+  actor       String   @default("")
+  /// For UPDATED: [{ field, label, from, to }] (Aadhaar numbers masked)
+  changes     Json     @default("[]")
+  /// e.g. the reason a registration was rejected
+  note        String   @default("")
+  /// Set by the database when the entry is written
+  createdAt   DateTime @default(now())
+
+  @@index([studentId, createdAt])
+  @@index([createdAt])
+}

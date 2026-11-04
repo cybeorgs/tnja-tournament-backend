@@ -4,6 +4,7 @@ import prisma from "../db.js";
 import { HttpError } from "../middleware/errors.js";
 import { getSettings } from "./helpers.js";
 import { isKnownLocation, lookupPincode } from "./locations.js";
+import { recordStudentAudit, type Actor } from "./audit.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -157,11 +158,14 @@ export async function createStudent(
     source = "ADMIN",
     documents = [],
     bulkImport: _bulkImport = false,
+    actor,
   }: {
     source?: "ADMIN" | "SELF";
     documents?: StudentUpload[];
     /** Admin bulk import from a spreadsheet */
     bulkImport?: boolean;
+    /** Who is adding the student, for the audit log (the student themselves when source is SELF) */
+    actor?: Actor;
   } = {},
 ) {
   await assertAadhaarFree(tx, data.aadhaarNumber);
@@ -170,6 +174,8 @@ export async function createStudent(
     data: { ...data, source, status: approved ? "APPROVED" : "PENDING", studentNo: approved ? await nextStudentNo(tx) : null },
   });
   for (const doc of documents) await tx.studentDocument.create({ data: { studentId: student.id, ...doc } });
+  const by: Actor = actor ?? (source === "SELF" ? { type: "STUDENT", name: student.email } : { type: _bulkImport ? "IMPORT" : "ADMIN", name: "admin" });
+  await recordStudentAudit(tx, student, "CREATED", by, { note: source === "SELF" ? "Registered on the website" : _bulkImport ? "Imported from a spreadsheet" : "Added by an admin" });
   return student;
 }
 

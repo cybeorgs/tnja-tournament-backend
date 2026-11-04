@@ -13,6 +13,7 @@ import { checkRows, readSheet, templateWorkbook } from "../lib/studentImport.js"
 import { getJob, startJob } from "../lib/importJobs.js";
 import { undeliverable } from "../lib/importSheet.js";
 import { emailApproval, emailRegistration, emailRegistrationLater } from "../lib/registrationEmails.js";
+import { adminActor, diffStudent, recordStudentAudit } from "../lib/audit.js";
 
 const listQuery = z.object({
   q: z.string().trim().optional(),
@@ -209,7 +210,7 @@ studentsRouter.post("/import", express.raw({ type: () => true, limit: "5mb" }), 
       try {
         // One row at a time: a problem with one student doesn't stop the rest.
         const student = await prisma.$transaction(async (tx) => {
-          const s = await createStudent(tx, r.data!, { source: "ADMIN", bulkImport: true });
+          const s = await createStudent(tx, r.data!, { source: "ADMIN", bulkImport: true, actor: { type: "IMPORT", name: req.admin?.username || "admin" } });
           await ensureAccount(tx, s.email);
           return s;
         });
@@ -244,7 +245,7 @@ studentsRouter.get("/import/jobs/:jobId", (req, res) => {
 studentsRouter.post("/", async (req, res) => {
   const data = await confirmResidency(studentSchema.parse(req.body));
   const student = await prisma.$transaction(async (tx) => {
-    const created = await createStudent(tx, data);
+    const created = await createStudent(tx, data, { actor: adminActor(req) });
     await ensureAccount(tx, created.email);
     return created;
   });
@@ -277,13 +278,16 @@ studentsRouter.get("/:id/documents/:kind", async (req, res) => {
 studentsRouter.put("/:id", async (req, res) => {
   const id = param(req, "id");
   const data = await confirmResidency(studentSchema.parse(req.body));
-  const existing = await prisma.student.findUnique({ where: { id }, select: { email: true } });
+  const existing = await prisma.student.findUnique({ where: { id } });
   if (!existing) throw notFound("Student");
   const emailChanged = existing.email.toLowerCase() !== data.email;
   await assertAadhaarFree(prisma, data.aadhaarNumber, id);
   const student = await prisma.$transaction(async (tx) => {
     const updated = await tx.student.update({ where: { id }, data });
     if (emailChanged) await ensureAccount(tx, data.email);
+    // The change and its audit entry are saved together (or not at all).
+    const changes = diffStudent(existing, updated);
+    if (changes.length) await recordStudentAudit(tx, updated, "UPDATED", adminActor(req), { changes });
     return updated;
   });
   res.json(student);
@@ -291,7 +295,14 @@ studentsRouter.put("/:id", async (req, res) => {
 
 /** Approve an application from outside Tamil Nadu: issues the permanent ID and emails it with the registration PDF. */
 studentsRouter.post("/:id/approve", async (req, res) => {
-  const student = await prisma.$transaction((tx) => approveStudent(tx, param(req, "id")));
+  const student = await prisma.$transaction(async (tx) => {
+    const before = await tx.student.findUnique({ where: { id: param(req, "id") } });
+    const approved = await approveStudent(tx, param(req, "id"));
+    if (before && before.status !== "APPROVED") {
+      await recordStudentAudit(tx, approved, "APPROVED", adminActor(req), { changes: diffStudent(before, approved), note: `Student ID ${approved.studentNo} issued` });
+    }
+    return approved;
+  });
   emailApproval(student).catch((err) => console.error("[registration email] approval failed:", err));
   res.json(student);
 });
@@ -301,13 +312,23 @@ studentsRouter.post("/:id/reject", async (req, res) => {
   const existing = await prisma.student.findUnique({ where: { id: param(req, "id") } });
   if (!existing) throw notFound("Student");
   if (existing.status === "APPROVED") throw new HttpError(409, "This student is already approved.");
-  const student = await prisma.student.update({ where: { id: existing.id }, data: { status: "REJECTED", reviewNote: reason, reviewedAt: new Date() } });
+  const student = await prisma.$transaction(async (tx) => {
+    const updated = await tx.student.update({ where: { id: existing.id }, data: { status: "REJECTED", reviewNote: reason, reviewedAt: new Date() } });
+    await recordStudentAudit(tx, updated, "REJECTED", adminActor(req), { changes: diffStudent(existing, updated), note: reason });
+    return updated;
+  });
   res.json(student);
 });
 
 studentsRouter.delete("/:id", async (req, res) => {
   // Restricted by the Registration foreign key: students with entries can't be deleted.
-  await prisma.student.delete({ where: { id: param(req, "id") } });
+  // The audit log keeps the record of the deletion (and everything before it) for good.
+  await prisma.$transaction(async (tx) => {
+    const student = await tx.student.findUnique({ where: { id: param(req, "id") } });
+    if (!student) throw notFound("Student");
+    await tx.student.delete({ where: { id: student.id } });
+    await recordStudentAudit(tx, student, "DELETED", adminActor(req), { note: `${student.fullName}${student.email ? ` (${student.email})` : ""}` });
+  });
   res.json({ message: "Student deleted." });
 });
 
