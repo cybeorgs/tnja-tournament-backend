@@ -14,7 +14,7 @@ const VERIFIED_PURPOSE = "aadhaar-verified";
 const signingKey = () => crypto.createHmac("sha256", env.jwtSecret).update("aadhaar-verification").digest("hex");
 
 export const isValidAadhaar = (value: unknown): value is string => typeof value === "string" && /^[2-9]\d{11}$/.test(value);
-export const isValidPincode = (value: unknown): value is string => typeof value === "string" && /^[1-9]\d{5}$/.test(value);
+export { isValidPincode } from "./locations.js";
 
 /** YYYY-MM-DD, as the registration form sends it */
 export const isValidDob = (value: unknown): value is string => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value));

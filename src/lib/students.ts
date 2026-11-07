@@ -3,7 +3,7 @@ import { z } from "zod";
 import prisma from "../db.js";
 import { HttpError } from "../middleware/errors.js";
 import { getSettings } from "./helpers.js";
-import { isKnownLocation, lookupPincode } from "./locations.js";
+import { PINCODE_FORMAT_MESSAGE, PINCODE_PATTERN, isKnownLocation, lookupPincode } from "./locations.js";
 import { recordStudentAudit, type Actor } from "./audit.js";
 
 type Tx = Prisma.TransactionClient;
@@ -13,7 +13,7 @@ type Tx = Prisma.TransactionClient;
 const name = (label: string) => z.string().trim().min(2, `${label} is required`).max(120).regex(/^[A-Za-z\s.'-]+$/, `${label} can only contain letters`);
 const text = (label: string, max = 120) => z.string().trim().min(1, `${label} is required`).max(max);
 const optional = (max = 120) => z.string().trim().max(max).default("");
-const pincode = (label: string) => z.string().trim().regex(/^[1-9]\d{5}$/, `${label} must be 6 digits`);
+const pincode = (label: string) => z.string().trim().regex(PINCODE_PATTERN, `${label} ${PINCODE_FORMAT_MESSAGE}`);
 const mobile = z.string().trim().regex(/^[6-9]\d{9}$/, "Enter a valid 10-digit mobile number");
 
 const threeYearsAgo = () => {

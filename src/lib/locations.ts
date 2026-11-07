@@ -54,10 +54,23 @@ async function fetchPostOffices(pincode: string): Promise<PostOffice[]> {
   return offices;
 }
 
-/** Result of a pincode lookup: a Tamil Nadu district and its candidate taluks, or the state elsewhere. */
+/**
+ * Result of a pincode lookup: a Tamil Nadu district and its candidate taluks, or the state elsewhere.
+ * `found` is false when the India Post directory has no record of the pincode. That directory is
+ * incomplete, so a missing record doesn't make the pincode invalid. `district` is "" when it couldn't
+ * be worked out, and the student picks it.
+ */
 export type PincodeLocation =
-  | { pincode: string; inTamilNadu: true; state: "Tamil Nadu"; district: string; taluks: string[]; postOffices: string[] }
-  | { pincode: string; inTamilNadu: false; state: string; district: string; taluks: []; postOffices: string[] };
+  | { pincode: string; found: boolean; inTamilNadu: true; state: "Tamil Nadu"; district: string; taluks: string[]; postOffices: string[] }
+  | { pincode: string; found: boolean; inTamilNadu: false; state: string; district: string; taluks: []; postOffices: string[] };
+
+/** An Indian PIN: exactly 6 digits, the first 1–9 (no Indian PIN starts with 0). */
+export const PINCODE_PATTERN = /^[1-9]\d{5}$/;
+export const PINCODE_FORMAT_MESSAGE = "must be exactly 6 digits (numbers only, not starting with 0)";
+export const isValidPincode = (value: unknown): value is string => typeof value === "string" && PINCODE_PATTERN.test(value);
+
+// PINs in the Tamil Nadu postal circle start 60–64 (the circle also covers Puducherry and Karaikal).
+const inTamilNaduCircle = (pincode: string) => /^6[0-4]/.test(pincode);
 
 /**
  * Where a pincode is. For Tamil Nadu: the district and taluk(s).
@@ -65,7 +78,7 @@ export type PincodeLocation =
  * matches current taluk names, so taluks are matched first and the district follows from them.
  */
 export async function lookupPincode(pincode: string): Promise<PincodeLocation> {
-  if (!/^[1-9]\d{5}$/.test(pincode)) throw new HttpError(400, "Pincode must be 6 digits.");
+  if (!isValidPincode(pincode)) throw new HttpError(400, `Pincode ${PINCODE_FORMAT_MESSAGE}.`);
 
   let all: PostOffice[];
   try {
@@ -74,12 +87,18 @@ export async function lookupPincode(pincode: string): Promise<PincodeLocation> {
     console.error("Pincode lookup failed:", err);
     throw new HttpError(502, "Couldn't look up this pincode right now. Please try again.");
   }
-  if (!all.length) throw new HttpError(404, "This pincode wasn't found. Please check it.");
+  if (!all.length) {
+    // Not in the India Post directory (e.g. 600112, Choolai, Chennai). The format is valid, so accept it:
+    // the postal circle decides which form applies, and the student picks the district (and taluk).
+    return inTamilNaduCircle(pincode)
+      ? { pincode, found: false, inTamilNadu: true, state: "Tamil Nadu", district: "", taluks: [], postOffices: [] }
+      : { pincode, found: false, inTamilNadu: false, state: "", district: "", taluks: [], postOffices: [] };
+  }
 
   const offices = all.filter((o) => nameKey(o.State) === "tamilnadu");
   if (!offices.length) {
     const first = all[0]!;
-    return { pincode, inTamilNadu: false, state: first.State, district: first.District, taluks: [], postOffices: all.map((o) => o.Name) };
+    return { pincode, found: true, inTamilNadu: false, state: first.State, district: first.District, taluks: [], postOffices: all.map((o) => o.Name) };
   }
 
   const blockKeys = new Set(offices.map((o) => nameKey(o.Block)));
@@ -99,8 +118,9 @@ export async function lookupPincode(pincode: string): Promise<PincodeLocation> {
     const postDistricts = new Set(offices.map((o) => nameKey(o.District)));
     district = TN_LOCATIONS.find((d) => postDistricts.has(nameKey(d.district)))?.district;
   }
-  if (!district) throw new HttpError(404, "Pincode not recognised. Pick the district and taluk below.");
+  // A Tamil Nadu pincode we can't place in a district: the student picks the district and taluk.
+  if (!district) return { pincode, found: true, inTamilNadu: true, state: "Tamil Nadu", district: "", taluks: [], postOffices: offices.map((o) => o.Name) };
 
   const taluks = [...new Set(matched.filter((m) => m.district === district).map((m) => m.taluk))].sort();
-  return { pincode, inTamilNadu: true, state: "Tamil Nadu", district, taluks, postOffices: offices.map((o) => o.Name) };
+  return { pincode, found: true, inTamilNadu: true, state: "Tamil Nadu", district, taluks, postOffices: offices.map((o) => o.Name) };
 }
