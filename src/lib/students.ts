@@ -23,6 +23,8 @@ const threeYearsAgo = () => {
 };
 
 export const BLOOD_GROUPS = ["O+ve", "O-ve", "A+ve", "A-ve", "B+ve", "B-ve", "AB+ve", "AB-ve"] as const;
+export const PARTICIPANT_TYPES = ["STUDENT", "PROFESSIONAL"] as const;
+export const EMPLOYMENT_TYPES = ["PRIVATE", "GOVERNMENT", "SELF_EMPLOYED", "OTHER"] as const;
 
 export const studentSchema = z
   .object({
@@ -60,11 +62,19 @@ export const studentSchema = z
     annualIncome: z.coerce.number({ error: "Annual income is required" }).int().min(0).max(1_000_000_000),
     isBPL: z.boolean().default(false),
 
-    // Education
-    institutionType: z.enum(["SCHOOL", "COLLEGE", "DIPLOMA"], { error: "Choose the institution type" }),
-    institutionName: text("Institution name", 150),
-    grade: text("Standard / year", 40),
+    /** Student or working professional: decides whether the education or the occupation details are required */
+    participantType: z.enum(PARTICIPANT_TYPES, { error: "Choose student or working professional" }).default("STUDENT"),
+
+    // Education (students)
+    institutionType: z.union([z.literal(""), z.enum(["SCHOOL", "COLLEGE", "DIPLOMA"], { error: "Choose the institution type" })]).default(""),
+    institutionName: optional(150),
+    grade: optional(40),
     degreeDepartment: optional(),
+
+    // Occupation (working professionals)
+    employmentType: z.union([z.literal(""), z.enum(EMPLOYMENT_TYPES, { error: "Choose the employment type" })]).default(""),
+    organisationName: optional(150),
+    occupation: optional(100),
 
     // Academy (optional)
     club: optional(),
@@ -76,9 +86,30 @@ export const studentSchema = z
     managerName: optional(),
     districtPresident: optional(),
     districtSecretary: optional(),
+  })
+  // Students give their education, working professionals their occupation.
+  .superRefine((s, ctx) => {
+    const need = (ok: unknown, path: string, message: string) => { if (!ok) ctx.addIssue({ code: "custom", path: [path], message }); };
+    if (s.participantType === "PROFESSIONAL") {
+      need(s.employmentType, "employmentType", "Choose the employment type");
+      need(s.organisationName, "organisationName", "Organisation / employer name is required");
+      need(s.occupation, "occupation", "Designation / role is required");
+    } else {
+      need(s.institutionType, "institutionType", "Choose the institution type");
+      need(s.institutionName, "institutionName", "Institution name is required");
+      need(s.grade, "grade", "Standard / year is required");
+    }
   });
 
 export type StudentData = z.infer<typeof studentSchema>;
+
+/** Keep only the details for the participant type: education for students, occupation for working professionals. */
+function clearOtherDetails<T>(data: T): T {
+  const type = (data as { participantType?: string }).participantType;
+  if (type === "PROFESSIONAL") return { ...data, institutionType: "", institutionName: "", grade: "", degreeDepartment: "" };
+  if (type === "STUDENT") return { ...data, employmentType: "", organisationName: "", occupation: "" };
+  return data;
+}
 
 /**
  * Decide from the pincode itself whether the student lives in Tamil Nadu, rather than trusting
@@ -88,7 +119,7 @@ export type StudentData = z.infer<typeof studentSchema>;
 export async function confirmResidency<T extends { residingPincode: string; outsideTamilNadu: boolean; isBPL: boolean; district: string; taluk: string; parentPhone: string; emergencyPhone: string }>(data: T): Promise<T> {
   // One number: the parent's mobile is the emergency contact (whichever was given fills both).
   const contact = data.parentPhone || data.emergencyPhone;
-  data = { ...data, parentPhone: contact, emergencyPhone: contact };
+  data = clearOtherDetails({ ...data, parentPhone: contact, emergencyPhone: contact });
   let outside = data.outsideTamilNadu;
   try {
     outside = !(await lookupPincode(data.residingPincode)).inTamilNadu;
@@ -138,12 +169,15 @@ export function decodeUpload(dataUrl: string, label: string, maxBytes = 1024 * 1
 
 // ─── Permanent student ID ────────────────────────────────────────────────────
 
-/** Next permanent student ID, e.g. TNJA-S-000123. Numbers come from a database sequence, so they never repeat. */
-async function nextStudentNo(tx: Tx): Promise<string> {
+/**
+ * Next permanent ID: TNJA-S-000123 for a student, TNJA-P-000124 for a working professional.
+ * Both share one database sequence, so a number is never used twice.
+ */
+async function nextStudentNo(tx: Tx, participantType: string): Promise<string> {
   const settings = await getSettings();
   const prefix = settings.orgShortName.replace(/[^A-Za-z0-9]/g, "").toUpperCase() || "STU";
   const [row] = await tx.$queryRaw<{ n: bigint }[]>`SELECT nextval('student_no_seq') AS n`;
-  return `${prefix}-S-${String(row!.n).padStart(6, "0")}`;
+  return `${prefix}-${participantType === "PROFESSIONAL" ? "P" : "S"}-${String(row!.n).padStart(6, "0")}`;
 }
 
 /**
@@ -171,7 +205,7 @@ export async function createStudent(
   await assertAadhaarFree(tx, data.aadhaarNumber);
   const approved = source === "ADMIN" || !data.outsideTamilNadu;
   const student = await tx.student.create({
-    data: { ...data, source, status: approved ? "APPROVED" : "PENDING", studentNo: approved ? await nextStudentNo(tx) : null },
+    data: { ...data, source, status: approved ? "APPROVED" : "PENDING", studentNo: approved ? await nextStudentNo(tx, data.participantType) : null },
   });
   for (const doc of documents) await tx.studentDocument.create({ data: { studentId: student.id, ...doc } });
   const by: Actor = actor ?? (source === "SELF" ? { type: "STUDENT", name: student.email } : { type: _bulkImport ? "IMPORT" : "ADMIN", name: "admin" });
@@ -186,6 +220,6 @@ export async function approveStudent(tx: Tx, id: string) {
   if (student.status === "APPROVED") return student;
   return tx.student.update({
     where: { id },
-    data: { status: "APPROVED", studentNo: student.studentNo ?? (await nextStudentNo(tx)), reviewNote: "", reviewedAt: new Date() },
+    data: { status: "APPROVED", studentNo: student.studentNo ?? (await nextStudentNo(tx, student.participantType)), reviewNote: "", reviewedAt: new Date() },
   });
 }

@@ -35,10 +35,14 @@ export const IMPORT_COLUMNS: ImportColumn<Field>[] = [
   { field: "nationality", header: "Nationality", required: false, aliases: [], note: "Defaults to Indian", example: "Indian" },
   { field: "annualIncome", header: "Annual Income", required: true, aliases: ["income", "familyincome"], note: "Rupees, numbers only", example: 150000 },
   { field: "isBPL", header: "BPL", required: false, aliases: ["isbpl", "belowpovertyline"], note: "Yes or No", example: "No" },
-  { field: "institutionType", header: "Institution Type", required: true, aliases: ["institution type", "studying"], note: "School, College or Diploma", example: "School" },
-  { field: "institutionName", header: "Institution Name", required: true, aliases: ["institution", "schoolname", "school", "collegename", "college"], note: "", example: "Govt Hr Sec School" },
-  { field: "grade", header: "Standard / Year", required: true, aliases: ["grade", "class", "standard", "year", "std"], note: "", example: "10th" },
+  { field: "participantType", header: "Type", required: false, aliases: ["participanttype", "playertype", "studentorprofessional"], note: "Student or Working professional; defaults to Student", example: "Student" },
+  { field: "institutionType", header: "Institution Type", required: false, aliases: ["institution type", "studying"], note: "Students: School, College or Diploma", example: "School" },
+  { field: "institutionName", header: "Institution Name", required: false, aliases: ["institution", "schoolname", "school", "collegename", "college"], note: "Students", example: "Govt Hr Sec School" },
+  { field: "grade", header: "Standard / Year", required: false, aliases: ["grade", "class", "standard", "year", "std"], note: "Students", example: "10th" },
   { field: "degreeDepartment", header: "Department", required: false, aliases: ["degree", "degreedepartment", "course"], note: "College / diploma", example: "" },
+  { field: "employmentType", header: "Employment Type", required: false, aliases: ["employment", "jobtype", "sector"], note: "Working professionals: Private, Government, Self-employed or Other", example: "" },
+  { field: "organisationName", header: "Organisation", required: false, aliases: ["organization", "organisationname", "organizationname", "employer", "company", "companyname"], note: "Working professionals", example: "" },
+  { field: "occupation", header: "Designation", required: false, aliases: ["designation", "role", "jobtitle", "occupation", "profession"], note: "Working professionals", example: "" },
   { field: "club", header: "Club", required: false, aliases: ["academy", "clubname", "dojo"], note: "", example: "Chennai Judo Club" },
   { field: "coachName", header: "Coach Name", required: false, aliases: ["coach"], note: "", example: "Ravi M" },
   { field: "belt", header: "Belt", required: false, aliases: ["beltgrade", "kyu"], note: "", example: "Yellow" },
@@ -96,7 +100,13 @@ function toInput(values: Partial<Record<Field, Cell>>) {
   const pincode = digits(v.pincode);
   const location = canonicalLocation(str(v.district), str(v.taluk));
   const institution = key(str(v.institutionType));
+  const type = key(str(v.participantType));
+  const employment = key(str(v.employmentType));
   return {
+    participantType: !type || type.startsWith("student") ? "STUDENT" : /professional|working|employee|employed/.test(type) ? "PROFESSIONAL" : str(v.participantType).toUpperCase(),
+    employmentType: !employment ? "" : employment.startsWith("priv") ? "PRIVATE" : employment.startsWith("gov") ? "GOVERNMENT" : employment.startsWith("self") ? "SELF_EMPLOYED" : employment.startsWith("other") ? "OTHER" : str(v.employmentType).toUpperCase(),
+    organisationName: str(v.organisationName),
+    occupation: str(v.occupation),
     fullName: str(v.fullName),
     fatherName: str(v.fatherName),
     motherName: str(v.motherName),

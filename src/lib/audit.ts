@@ -20,6 +20,7 @@ const LABELS: Record<string, string> = {
   residingPincode: "Residing pincode", outsideTamilNadu: "Outside Tamil Nadu", district: "District", taluk: "Taluk",
   address: "Address", city: "City", state: "State", pincode: "Pincode", annualIncome: "Annual income", isBPL: "BPL family",
   institutionType: "Institution type", institutionName: "Institution", grade: "Standard / year", degreeDepartment: "Department",
+  participantType: "Type", employmentType: "Employment type", organisationName: "Organisation", occupation: "Designation",
   club: "Club", coachName: "Coach", belt: "Belt", weightKg: "Weight (kg)", managerName: "Manager",
   districtPresident: "District president", districtSecretary: "District secretary",
   status: "Status", studentNo: "Student ID", reviewNote: "Review note",

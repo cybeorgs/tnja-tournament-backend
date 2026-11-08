@@ -123,12 +123,23 @@ model Student {
   annualIncome     Int?
   /// Below poverty line; Tamil Nadu residents upload proof when registering themselves
   isBPL            Boolean  @default(false)
+  /// STUDENT | PROFESSIONAL (working professional). Both play the same age and weight categories
+  /// and pay the same fees; only the education / occupation details differ.
+  participantType  String   @default("STUDENT")
+  // ── Education (students) ──
   /// SCHOOL | COLLEGE | DIPLOMA
   institutionType  String   @default("")
   institutionName  String   @default("")
   /// Standard (school) or year (college / diploma)
   grade            String   @default("")
   degreeDepartment String   @default("")
+  // ── Occupation (working professionals) ──
+  /// PRIVATE | GOVERNMENT | SELF_EMPLOYED | OTHER
+  employmentType   String   @default("")
+  /// Employer / organisation (or business name when self-employed)
+  organisationName String   @default("")
+  /// Designation / role
+  occupation       String   @default("")
   coachName        String   @default("")
   // ── Additional details (printed on the hall ticket) ──
   /// Body weight given at registration, kg (each tournament entry records its own weight too)
@@ -146,6 +157,7 @@ model Student {
 
   @@index([email])
   @@index([status])
+  @@index([participantType])
 }
 
 /// Files uploaded with a registration: the passport-size photo, BPL proof, or proof of nativity for applicants outside Tamil Nadu.

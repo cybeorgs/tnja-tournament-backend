@@ -19,6 +19,7 @@ const date = (d: Date, withTime = false) =>
   d.toLocaleString("en-IN", { day: "numeric", month: "long", year: "numeric", timeZone: "Asia/Kolkata", ...(withTime ? { hour: "numeric", minute: "2-digit" } : {}) });
 const GENDER: Record<string, string> = { MALE: "Male", FEMALE: "Female", OTHER: "Other" };
 const INSTITUTION: Record<string, string> = { SCHOOL: "School", COLLEGE: "College", DIPLOMA: "Diploma" };
+const EMPLOYMENT: Record<string, string> = { PRIVATE: "Private", GOVERNMENT: "Government", SELF_EMPLOYED: "Self-employed", OTHER: "Other" };
 
 /** The text, shortened with "..." if it doesn't fit in `maxWidth`. */
 function fit(text: string, font: PDFFont, size: number, maxWidth: number) {
@@ -96,11 +97,17 @@ export async function registrationPdf(student: Student): Promise<Attachment> {
       ["Address", student.address], ["City", student.city], ["District", student.district], ["Taluk", student.taluk || "-"],
       ["State", student.state], ["Pincode", student.pincode], ["Residing pincode", student.residingPincode],
     ]],
-    ["Education & club", [
-      ["Institution", `${student.institutionName}${student.institutionType ? ` (${INSTITUTION[student.institutionType] ?? student.institutionType})` : ""}`],
-      ["Standard / year", student.grade], ...(student.degreeDepartment ? [["Department", student.degreeDepartment] as [string, string]] : []),
-      ["Club", student.club || "-"], ["Coach", student.coachName || "-"], ["Belt", student.belt || "-"],
-    ]],
+    student.participantType === "PROFESSIONAL"
+      ? ["Occupation & club", [
+          ["Organisation", `${student.organisationName}${student.employmentType ? ` (${EMPLOYMENT[student.employmentType] ?? student.employmentType})` : ""}`],
+          ["Designation", student.occupation],
+          ["Club", student.club || "-"], ["Coach", student.coachName || "-"], ["Belt", student.belt || "-"],
+        ]]
+      : ["Education & club", [
+          ["Institution", `${student.institutionName}${student.institutionType ? ` (${INSTITUTION[student.institutionType] ?? student.institutionType})` : ""}`],
+          ["Standard / year", student.grade], ...(student.degreeDepartment ? [["Department", student.degreeDepartment] as [string, string]] : []),
+          ["Club", student.club || "-"], ["Coach", student.coachName || "-"], ["Belt", student.belt || "-"],
+        ]],
   ];
 
   const row = (p: PDFPage, label: string, value: string, x: number, yy: number, w: number) => {

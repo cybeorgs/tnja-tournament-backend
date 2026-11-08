@@ -4,7 +4,7 @@ import { z } from "zod";
 import prisma from "../db.js";
 import { HttpError, notFound } from "../middleware/errors.js";
 import { param } from "../lib/helpers.js";
-import { DOCUMENT_KINDS, approveStudent, assertAadhaarFree, confirmResidency, createStudent, studentSchema } from "../lib/students.js";
+import { DOCUMENT_KINDS, PARTICIPANT_TYPES, approveStudent, assertAadhaarFree, confirmResidency, createStudent, studentSchema } from "../lib/students.js";
 import { ensureAccount } from "../lib/accounts.js";
 import { DATE, DATE_TIME, maskAadhaar, sendSheets, sheet, yearAge, type Column } from "../lib/excel.js";
 import { AGE_GROUPS, AGE_GROUP_NAMES, eligibleAgeGroups } from "../lib/categories.js";
@@ -28,8 +28,10 @@ export const studentsRouter = Router();
 function studentWhere(query: unknown) {
   const { q } = z.object({ q: z.string().trim().optional() }).parse(query);
   const status = z.enum(["APPROVED", "PENDING", "REJECTED"]).optional().parse((query as Record<string, unknown>).status || undefined);
+  const participantType = z.enum(PARTICIPANT_TYPES).optional().parse((query as Record<string, unknown>).type || undefined);
   const where = {
     ...(status ? { status } : {}),
+    ...(participantType ? { participantType } : {}),
     ...(q
       ? { OR: [{ fullName: { contains: q, mode: "insensitive" as const } }, { studentNo: { contains: q, mode: "insensitive" as const } }, { club: { contains: q, mode: "insensitive" as const } }, { phone: { contains: q } }, { email: { contains: q.toLowerCase() } }] }
       : {}),
@@ -57,6 +59,8 @@ const LABEL = {
   weighIn: { PENDING: "Not weighed", CLEARED: "Cleared", DISQUALIFIED: "Disqualified" } as Record<string, string>,
   placement: { FIRST: "1st", SECOND: "2nd", THIRD: "3rd", PARTICIPATION: "Participation" } as Record<string, string>,
   document: { BPL_PROOF: "BPL proof", NATIVITY_PROOF: "Nativity proof" } as Record<string, string>,
+  participant: { STUDENT: "Student", PROFESSIONAL: "Working professional" } as Record<string, string>,
+  employment: { PRIVATE: "Private", GOVERNMENT: "Government", SELF_EMPLOYED: "Self-employed", OTHER: "Other" } as Record<string, string>,
 };
 const label = (map: Record<string, string>, v: string | null | undefined) => (v ? map[v] ?? v : "");
 
@@ -91,6 +95,7 @@ studentsRouter.get("/export", async (req, res) => {
   const studentColumns: Column<S>[] = [
     { header: "Student ID", width: 16, value: (s) => s.studentNo },
     { header: "Status", width: 18, value: (s) => label(LABEL.status, s.status) },
+    { header: "Type", width: 20, value: (s) => label(LABEL.participant, s.participantType) },
     { header: "Full name", width: 26, value: (s) => s.fullName },
     { header: "Gender", value: (s) => label(LABEL.gender, s.gender) },
     { header: "Date of birth", value: (s) => s.dob, format: DATE },
@@ -119,6 +124,9 @@ studentsRouter.get("/export", async (req, res) => {
     { header: "Institution", width: 28, value: (s) => s.institutionName },
     { header: "Standard / year", value: (s) => s.grade },
     { header: "Department", width: 18, value: (s) => s.degreeDepartment },
+    { header: "Employment type", width: 16, value: (s) => label(LABEL.employment, s.employmentType) },
+    { header: "Organisation", width: 28, value: (s) => s.organisationName },
+    { header: "Designation", width: 20, value: (s) => s.occupation },
     { header: "Club", width: 22, value: (s) => s.club },
     { header: "Coach", width: 20, value: (s) => s.coachName },
     { header: "Belt", value: (s) => s.belt },
@@ -277,9 +285,10 @@ studentsRouter.get("/:id/documents/:kind", async (req, res) => {
 
 studentsRouter.put("/:id", async (req, res) => {
   const id = param(req, "id");
-  const data = await confirmResidency(studentSchema.parse(req.body));
   const existing = await prisma.student.findUnique({ where: { id } });
   if (!existing) throw notFound("Student");
+  // Student / working professional is fixed at registration (the permanent ID carries it: -S- or -P-).
+  const data = await confirmResidency(studentSchema.parse({ ...req.body, participantType: existing.participantType }));
   const emailChanged = existing.email.toLowerCase() !== data.email;
   await assertAadhaarFree(prisma, data.aadhaarNumber, id);
   const student = await prisma.$transaction(async (tx) => {
