@@ -53,6 +53,18 @@ studentsRouter.get("/", async (req, res) => {
   res.json({ items, total, page, pageSize, pending });
 });
 
+/** Counts for the tiles above the list. Rejected applications aren't counted. */
+studentsRouter.get("/stats", async (_req, res) => {
+  const byType = await prisma.student.groupBy({ by: ["participantType", "status"], where: { status: { not: "REJECTED" } }, _count: { _all: true } });
+  const count = (match: (r: (typeof byType)[number]) => boolean) => byType.filter(match).reduce((n, r) => n + r._count._all, 0);
+  res.json({
+    total: count(() => true),
+    students: count((r) => r.participantType !== "PROFESSIONAL"),
+    professionals: count((r) => r.participantType === "PROFESSIONAL"),
+    pending: count((r) => r.status === "PENDING"),
+  });
+});
+
 const LABEL = {
   status: { APPROVED: "Approved", PENDING: "Waiting for approval", REJECTED: "Rejected" } as Record<string, string>,
   gender: { MALE: "Male", FEMALE: "Female", OTHER: "Other" } as Record<string, string>,
