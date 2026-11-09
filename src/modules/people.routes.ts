@@ -201,8 +201,13 @@ studentsRouter.get("/import/template", async (_req, res) => {
  * Import students from the template (.xlsx or .csv), sent as the raw request body with the file name in
  * X-Filename. Runs in the background (a big file takes longer than the proxy waits): the reply is a job to
  * poll at GET /students/import/jobs/:jobId. ?dryRun=1 only checks every row. Otherwise the valid rows are
- * created (rows with problems are skipped and listed) and, with ?sendEmails=1, each new account gets its
- * set-password link by email.
+ * created (rows with problems are skipped and listed).
+ *
+ * Emails are off unless the admin explicitly asks: ?sendEmails=1&confirmEmails=<n>, where n is the number
+ * of emails the admin confirmed on screen. If more would go out than were confirmed, none are sent.
+ * Every email goes through the email service, so each student gets at most one (re-importing can't
+ * resend), they count against today's registration-email budget, and any over the limit are HELD for
+ * an admin to release rather than dropped. Each student's history notes whether emails were on.
  */
 studentsRouter.post("/import", express.raw({ type: () => true, limit: "5mb" }), async (req, res) => {
   const file = req.body;
@@ -210,6 +215,11 @@ studentsRouter.post("/import", express.raw({ type: () => true, limit: "5mb" }), 
   const filename = decodeURIComponent(String(req.headers["x-filename"] ?? "students.xlsx"));
   const dryRun = req.query.dryRun === "1";
   const sendEmails = req.query.sendEmails === "1";
+  const confirmedEmails = Number(req.query.confirmEmails ?? NaN);
+  if (!dryRun && sendEmails && !(Number.isInteger(confirmedEmails) && confirmedEmails > 0)) {
+    throw new HttpError(400, "Confirm how many registration emails will be sent before importing with emails on.");
+  }
+  const importedBy = req.admin?.username || "admin";
   // Read the sheet now, so a wrong file is reported straight away
   const { rows, missing, unknown } = await readSheet(file, filename);
 
@@ -230,7 +240,10 @@ studentsRouter.post("/import", express.raw({ type: () => true, limit: "5mb" }), 
       try {
         // One row at a time: a problem with one student doesn't stop the rest.
         const student = await prisma.$transaction(async (tx) => {
-          const s = await createStudent(tx, r.data!, { source: "ADMIN", bulkImport: true, actor: { type: "IMPORT", name: req.admin?.username || "admin" } });
+          const s = await createStudent(tx, r.data!, {
+            source: "ADMIN", bulkImport: true, actor: { type: "IMPORT", name: importedBy },
+            note: `Imported from a spreadsheet (${filename}) — registration email ${sendEmails ? "ON" : "OFF"}`,
+          });
           await ensureAccount(tx, s.email);
           return s;
         });
@@ -244,15 +257,29 @@ studentsRouter.post("/import", express.raw({ type: () => true, limit: "5mb" }), 
     failed.sort((a, b) => a.row - b.row);
 
     // Emails one by one after saving; never to reserved test domains (e.g. @example.invalid)
-    const mail = sendEmails ? welcome.filter((w) => !undeliverable(w.email)) : [];
-    if (mail.length) {
-      void (async () => {
-        for (const w of mail) {
-          await emailRegistration(w).catch((err: unknown) => console.error("Import registration email failed:", err));
-        }
-      })();
+    const deliverable = sendEmails ? welcome.filter((w) => !undeliverable(w.email)) : [];
+    // More than the admin confirmed (e.g. the file changed between the check and the import): send none.
+    const overConfirmed = deliverable.length > confirmedEmails;
+    const mail = overConfirmed ? [] : deliverable;
+    console.log(`[import] ${importedBy} imported ${created.length} students from ${filename}; registration emails ${sendEmails ? (overConfirmed ? `NOT sent (${deliverable.length} > ${confirmedEmails} confirmed)` : `on: ${mail.length}`) : "off"}`);
+    const emails = { sent: 0, held: 0, failed: 0 };
+    Object.assign(job, { phase: "EMAILING", total: mail.length, done: 0 });
+    for (const w of mail) {
+      const delivery = await emailRegistration(w, { trigger: "IMPORT", actor: importedBy }).catch((err: unknown) => {
+        console.error("Import registration email failed:", err);
+        return null;
+      });
+      if (delivery && ["SENT", "LOGGED", "UNCERTAIN", "DUPLICATE"].includes(delivery.status)) emails.sent++;
+      else if (delivery?.status === "HELD") emails.held++;
+      else emails.failed++;
+      job.done++;
     }
-    return { created: created.length, students: created, failed, emailsQueued: mail.length, emailsSkipped: sendEmails ? welcome.length - mail.length : 0 };
+    return {
+      created: created.length, students: created, failed,
+      emailsEnabled: sendEmails, emailsQueued: mail.length, emailsSent: emails.sent, emailsHeld: emails.held, emailsFailed: emails.failed,
+      emailsBlocked: overConfirmed ? deliverable.length : 0,
+      emailsSkipped: sendEmails ? welcome.length - deliverable.length : 0,
+    };
   });
   res.status(202).json({ jobId: job.id });
 });
@@ -269,7 +296,7 @@ studentsRouter.post("/", async (req, res) => {
     await ensureAccount(tx, created.email);
     return created;
   });
-  emailRegistrationLater(student);
+  emailRegistrationLater(student, { trigger: "ADMIN", actor: req.admin?.username || "admin" });
   res.status(201).json(student);
 });
 
@@ -324,7 +351,7 @@ studentsRouter.post("/:id/approve", async (req, res) => {
     }
     return approved;
   });
-  emailApproval(student).catch((err) => console.error("[registration email] approval failed:", err));
+  emailApproval(student, { trigger: "ADMIN", actor: req.admin?.username || "admin" }).catch((err) => console.error("[registration email] approval failed:", err));
   res.json(student);
 });
 

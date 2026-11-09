@@ -15,6 +15,7 @@ import type { Registration, Student, Tournament } from "@prisma/client";
 import prisma from "../db.js";
 import { getSettings } from "./helpers.js";
 import { sendEntryPasses, type Attachment } from "./mailer.js";
+import type { EmailCause } from "./registrationEmails.js";
 
 const INK = rgb(0.06, 0.09, 0.16);
 const MUTED = rgb(0.39, 0.45, 0.55);
@@ -279,7 +280,7 @@ const sending = new Set<string>();
  * Email the passes of the student's events in the tournament that are ready (paid or free) and
  * haven't been emailed yet: one email, one PDF per event. Safe to call after any change.
  */
-export async function sendEntryPassesIfReady(tournamentId: string, studentId: string) {
+export async function sendEntryPassesIfReady(tournamentId: string, studentId: string, cause: EmailCause = { trigger: "SYSTEM" }) {
   const key = `${tournamentId}:${studentId}`;
   if (sending.has(key)) return;
   sending.add(key);
@@ -297,12 +298,19 @@ export async function sendEntryPassesIfReady(tournamentId: string, studentId: st
       fullName: student.fullName, studentNo: student.studentNo ?? "", tournament: tournament.title,
       events: entries.map((e) => ({ name: `${e.ageGroup} · ${e.gender === "FEMALE" ? "Girls" : "Boys"} ${e.weightCategory}`, passNo: entryPassNo(e) })),
       pdfs,
+    }, {
+      ...cause, studentId, tournamentId, registrationIds: entries.map((e) => e.id),
+      // One email per set of entries: the same passes are never emailed twice, even from two processes.
+      idempotencyKey: `entry-pass:${entries.map((e) => e.id).sort().join(",")}`,
     });
-    await prisma.emailLog.create({
-      data: { tournamentId, studentId, kind: "ENTRY_PASS", trigger: "AUTO", toEmail: delivery.to, subject: delivery.subject, status: delivery.status, error: delivery.error },
-    });
-    // A failed send is tried again the next time something changes.
-    if (delivery.status !== "FAILED") {
+    if (delivery.status !== "DUPLICATE") {
+      await prisma.emailLog.create({
+        data: { tournamentId, studentId, kind: "ENTRY_PASS", trigger: "AUTO", toEmail: delivery.to, subject: delivery.subject, status: delivery.status, error: delivery.error },
+      });
+    }
+    // Not sent (failed, suppressed, or held by the daily limit): tried again the next time something
+    // changes, or when an admin releases held emails.
+    if (!["FAILED", "HELD", "LIMITED", "SUPPRESSED"].includes(delivery.status)) {
       await prisma.registration.updateMany({ where: { id: { in: entries.map((e) => e.id) } }, data: { hallTicketSentAt: new Date() } });
     }
   } finally {
@@ -311,6 +319,6 @@ export async function sendEntryPassesIfReady(tournamentId: string, studentId: st
 }
 
 /** Fire-and-forget for request handlers: the entry or payment is saved whether or not the email goes. */
-export function sendEntryPassesLater(tournamentId: string, studentId: string) {
-  sendEntryPassesIfReady(tournamentId, studentId).catch((err) => console.error("[entry pass] failed:", err));
+export function sendEntryPassesLater(tournamentId: string, studentId: string, cause: EmailCause = { trigger: "SYSTEM" }) {
+  sendEntryPassesIfReady(tournamentId, studentId, cause).catch((err) => console.error("[entry pass] failed:", err));
 }

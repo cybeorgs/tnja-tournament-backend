@@ -127,9 +127,9 @@ router.post("/students/register", registerLimiter, async (req, res) => {
   // The registration email: username and password (Tamil Nadu: with the registration PDF; others: a temporary ID).
   // Sent before replying, so the screen can tell the player whether it went (a background send could be
   // lost, e.g. if the server restarts, with nobody knowing).
-  const loginEmail = await emailRegistrationNow(student);
+  const loginEmail = await emailRegistrationNow(student, { trigger: "SELF", actor: student.email });
   // Free events get their Tournament Entry Pass now; the others once paid.
-  if (entered.length && tournament) sendEntryPassesLater(tournament.id, student.id);
+  if (entered.length && tournament) sendEntryPassesLater(tournament.id, student.id, { trigger: "SELF", actor: student.email });
   res.status(201).json({
     status: student.status, studentNo: student.studentNo, tempId: student.studentNo ? null : tempIdOf(student), fullName: student.fullName, email: student.email, newAccount: account.created,
     /** Whether the username/password email was sent: SENT, FAILED, or NOT_CONFIGURED (no SMTP; written to the server log) */
@@ -184,7 +184,7 @@ router.post("/email-otp/send", otpSendLimiter, async (req, res) => {
   const challenge = await createEmailOtp(address, req.ip ?? "");
   let delivery: Awaited<ReturnType<typeof sendEmailOtp>>;
   try {
-    delivery = await sendEmailOtp(address, challenge.code, OTP_VALID_MINUTES);
+    delivery = await sendEmailOtp(address, challenge.code, OTP_VALID_MINUTES, challenge.id, req.ip ?? "");
   } catch (err) {
     // Not sent, so it doesn't count against the user's limits.
     await recordDelivery(challenge.id, { status: "FAILED" });
@@ -337,7 +337,7 @@ router.post("/tournaments/:slug/entry", entryLimiter, async (req, res) => {
     await repriceEntries(tx, tournament.id, student.id);
   });
 
-  sendEntryPassesLater(tournament.id, student.id);
+  sendEntryPassesLater(tournament.id, student.id, { trigger: "SELF", actor: student.email });
   res.json({ entries: (await studentEntries(tournament.id, student.id)).map(entryView), payToken: createPayToken(tournament.id, student.id) });
 });
 

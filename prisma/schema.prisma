@@ -361,6 +361,60 @@ model EmailSuppression {
   updatedAt DateTime @updatedAt
 }
 
+/// Every email the app tries to send, one row per logical email (see lib/emailService.ts). Doubles as
+/// the duplicate guard: a logical email (e.g. "registration email for student X") has one idempotencyKey,
+/// so a double click, a retry or a second server process can't send it twice. Never holds the body,
+/// OTP codes, passwords or reset links.
+model EmailMessage {
+  id             String    @id @default(uuid())
+  /// One per logical email, e.g. registration:<studentId>; null for emails that may repeat (password reset)
+  idempotencyKey String?   @unique
+  /// OTP | REGISTRATION_SUCCESS | APPLICATION_RECEIVED | REGISTRATION_APPROVED | PASSWORD_RESET | ENTRY_PASS
+  kind           String
+  /// Daily budget bucket: OTP | REGISTRATION | ENTRY_PASS | PASSWORD_RESET | ADMIN
+  category       String
+  /// What caused it: SELF (the player) | ADMIN | IMPORT | PAYMENT | SYSTEM
+  trigger        String
+  /// Who: the admin's username, or the player's email
+  actor          String    @default("")
+  toEmail        String
+  subject        String
+  studentId      String?
+  tournamentId   String?
+  registrationIds String[] @default([])
+  /// SENDING | SENT | LOGGED (console, development) | FAILED | SUPPRESSED | HELD (daily budget) |
+  /// UNCERTAIN (connection lost after the message was handed over: may have been delivered) | RELEASED
+  status         String
+  /// Our Message-ID header (also findable in Brevo's logs)
+  messageId      String    @default("")
+  error          String    @default("")
+  /// SMTP attempts made for this email, across retries and admin re-sends
+  attempts       Int       @default(0)
+  sentAt         DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([createdAt])
+  @@index([status, createdAt])
+  @@index([category, createdAt])
+  @@index([toEmail])
+}
+
+/// Emails used per day (India time) per budget category, counted atomically so several server
+/// processes can't overshoot a daily limit together. Limits come from EMAIL_DAILY_LIMIT_* env vars.
+model EmailDailyUsage {
+  /// YYYY-MM-DD in Asia/Kolkata
+  day            String
+  category       String
+  sent           Int      @default(0)
+  /// Extra emails an admin allowed today above the limit
+  extraAllowance Int      @default(0)
+  extraGrantedBy String   @default("")
+  updatedAt      DateTime @updatedAt
+
+  @@id([day, category])
+}
+
 /// Permanent, append-only history of every change to a student record: who did it, when, and what
 /// changed. The database refuses UPDATE, DELETE and TRUNCATE on this table (a trigger, see the
 /// migration), so no one — not even an admin or the app itself — can edit or remove an entry.

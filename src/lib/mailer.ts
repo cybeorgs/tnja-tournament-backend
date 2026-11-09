@@ -1,74 +1,15 @@
-import nodemailer, { type Transporter } from "nodemailer";
+// Email templates. Sending goes through lib/emailService.ts (audit log, duplicate guard, suppression
+// list, daily budget, one retry layer); nothing here talks to SMTP directly.
 import { env } from "../config/env.js";
 import { HttpError } from "../middleware/errors.js";
 import { getSettings } from "./helpers.js";
-import { suppress, suppressionOf, suppressionText } from "./emailSuppression.js";
+import { suppressionText } from "./emailSuppression.js";
+import { deliverEmail, type Delivery, type EmailContext } from "./emailService.js";
+import type { Attachment } from "./emailTransport.js";
 
-let transporter: Transporter | null = null;
-
-const smtpConfigured = () => !!(env.smtp.host && env.smtp.user && env.smtp.pass);
-
-/**
- * Startup check: providers such as Brevo log in with an SMTP login (e.g. 1234@smtp-brevo.com) that is not a
- * mailbox; mail "from" it is dropped. The sender must be an address verified with the provider (SMTP_FROM_EMAIL).
- */
-export function checkMailSetup() {
-  if (!smtpConfigured()) return console.warn("[mailer] SMTP is not configured — emails are only written to this log.");
-  if (!process.env.SMTP_FROM_EMAIL || /@smtp-brevo.com$/i.test(env.smtp.fromEmail)) {
-    console.warn("[mailer] SMTP_FROM_EMAIL is not set to a real sender address (it falls back to the SMTP login). Set it to a sender verified in your email provider (Brevo → Senders & domains), or emails may never arrive.");
-  }
-}
-
-export type Attachment = { filename: string; content: Buffer; contentType: string };
-
-/** The address is on the suppression list (bounced, blocked, spam complaint…): nothing was sent. */
-export class SuppressedRecipientError extends Error {
-  constructor(public reason: string) {
-    super(`Not sent: the address is suppressed (${reason}).`);
-  }
-}
-
-// Temporary failures (busy server, dropped connection, SMTP 4xx) get at most 2 more tries, spaced out.
-const RETRY_DELAYS_MS = [1000, 3000];
-const TEMPORARY_CODES = new Set(["ECONNECTION", "ETIMEDOUT", "ESOCKET", "ECONNRESET", "EDNS"]);
-type SmtpError = Error & { code?: string; responseCode?: number };
-const isTemporary = (err: SmtpError) => TEMPORARY_CODES.has(err.code ?? "") || (!!err.responseCode && err.responseCode >= 400 && err.responseCode < 500);
-// The server refused this recipient outright (550 mailbox unavailable, 551/553 bad address). Not our
-// login or the message, which have other codes: only these mean "never send to this address again".
-const isRecipientRejected = (err: SmtpError) => err.code === "EENVELOPE" && [550, 551, 553].includes(err.responseCode ?? 0);
-
-/**
- * Sends one email and returns the mail server's Message-ID. Suppressed addresses are never sent to;
- * a recipient the server rejects is suppressed (and not retried); temporary failures are retried twice.
- */
-async function sendMail(message: { to: string; subject: string; html: string; attachments?: Attachment[] }): Promise<string> {
-  const suppressed = await suppressionOf(message.to);
-  if (suppressed) throw new SuppressedRecipientError(suppressed.reason);
-  const settings = await getSettings();
-  transporter ??= nodemailer.createTransport({
-    host: env.smtp.host,
-    port: env.smtp.port,
-    secure: env.smtp.port === 465, // 465 is implicit TLS; others (e.g. 587) use STARTTLS
-    requireTLS: env.smtp.port !== 465,
-    auth: { user: env.smtp.user, pass: env.smtp.pass },
-  });
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const info = await transporter.sendMail({ from: `"${env.smtp.fromName || settings.orgName}" <${env.smtp.fromEmail}>`, ...message });
-      return String(info.messageId ?? "");
-    } catch (err) {
-      const e = err as SmtpError;
-      if (isRecipientRejected(e)) {
-        await suppress(message.to, e.responseCode === 550 ? "HARD_BOUNCE" : "INVALID", "SMTP", e.message);
-        throw err;
-      }
-      const delay = RETRY_DELAYS_MS[attempt];
-      if (delay === undefined || !isTemporary(e)) throw err;
-      console.warn(`[mailer] Temporary failure sending "${message.subject}" (${e.code ?? e.responseCode}); retry ${attempt + 1} of ${RETRY_DELAYS_MS.length} in ${delay / 1000}s`);
-      await new Promise((resolve) => setTimeout(resolve, delay));
-    }
-  }
-}
+export { checkMailSetup } from "./emailTransport.js";
+export type { Attachment } from "./emailTransport.js";
+export type { Delivery, EmailContext } from "./emailService.js";
 
 const escape = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 
@@ -102,26 +43,12 @@ const button = (href: string, label: string) =>
 const loginUrl = () => `${env.publicSiteUrl.replace(/\/$/, "")}/student/login`;
 const loginButton = () => (env.publicSiteUrl ? button(loginUrl(), "Log in") : "");
 
-/**
- * Send an email. Failures are logged, not thrown: the registration that triggered it has already
- * succeeded, and the student can always use "Forgot password" on the login page.
- */
-export type Delivery = { to: string; subject: string; status: "SENT" | "FAILED" | "NOT_CONFIGURED"; error: string };
-
-async function notify(to: string, subject: string, html: string, attachments?: Attachment[]): Promise<Delivery> {
-  if (!smtpConfigured()) {
-    console.log(`[mailer] SMTP not configured — would email ${to}: ${subject}\n${html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()}`);
-    return { to, subject, status: "NOT_CONFIGURED", error: "" };
-  }
+/** Template output → the central email service. Never throws: failures come back as a Delivery. */
+async function send(kind: Parameters<typeof deliverEmail>[0]["kind"], context: EmailContext, to: string, subject: string, html: string, attachments?: Attachment[]): Promise<Delivery> {
   try {
-    await sendMail({ to, subject, html, attachments });
-    return { to, subject, status: "SENT", error: "" };
+    return await deliverEmail({ kind, to, subject, html, attachments, context });
   } catch (err) {
-    if (err instanceof SuppressedRecipientError) {
-      console.warn(`[mailer] Skipped "${subject}" to ${to}: suppressed (${err.reason})`);
-      return { to, subject, status: "FAILED", error: `Not sent: ${suppressionText(err.reason)}.` };
-    }
-    console.error(`[mailer] Could not send "${subject}" to ${to}:`, err);
+    console.error(`[mailer] Unexpected error sending ${kind} to ${to}:`, err);
     return { to, subject, status: "FAILED", error: err instanceof Error ? err.message.slice(0, 500) : "Unknown error" };
   }
 }
@@ -146,8 +73,8 @@ const loginBlock = (login: Login) =>
      ${login.password ? `<p style="margin:8px 0 0;font-size:13px;color:#64748b">Keep this password private. You can change it after logging in.</p>` : ""}
    </div>${loginButton()}`;
 
-export async function sendRegistrationSuccess(to: string, s: { fullName: string; studentNo: string; login: Login; pdf: Attachment }) {
-  return notify(
+export async function sendRegistrationSuccess(to: string, s: { fullName: string; studentNo: string; login: Login; pdf: Attachment }, context: EmailContext) {
+  return send("REGISTRATION_SUCCESS", context,
     to,
     `Registration successful — ${s.studentNo}`,
     await layout(
@@ -159,8 +86,8 @@ export async function sendRegistrationSuccess(to: string, s: { fullName: string;
   );
 }
 
-export async function sendApplicationReceived(to: string, s: { fullName: string; tempId: string; login: Login }) {
-  return notify(
+export async function sendApplicationReceived(to: string, s: { fullName: string; tempId: string; login: Login }, context: EmailContext) {
+  return send("APPLICATION_RECEIVED", context,
     to,
     `Application received — ${s.tempId}`,
     await layout(
@@ -173,8 +100,8 @@ export async function sendApplicationReceived(to: string, s: { fullName: string;
   );
 }
 
-export async function sendRegistrationApproved(to: string, s: { fullName: string; studentNo: string; pdf: Attachment }) {
-  return notify(
+export async function sendRegistrationApproved(to: string, s: { fullName: string; studentNo: string; pdf: Attachment }, context: EmailContext) {
+  return send("REGISTRATION_APPROVED", context,
     to,
     `Registration approved — ${s.studentNo}`,
     await layout(
@@ -187,12 +114,12 @@ export async function sendRegistrationApproved(to: string, s: { fullName: string
 }
 
 /** After payment (or straight away when free): a Tournament Entry Pass per event, each as its own PDF. */
-export async function sendEntryPasses(to: string, s: { fullName: string; studentNo: string; tournament: string; events: { name: string; passNo: string }[]; pdfs: Attachment[] }) {
+export async function sendEntryPasses(to: string, s: { fullName: string; studentNo: string; tournament: string; events: { name: string; passNo: string }[]; pdfs: Attachment[] }, context: EmailContext) {
   const many = s.events.length > 1;
   const list = s.events
     .map((e) => `<tr><td style="padding:8px 12px;border-top:1px solid #e2e8f0">${escape(e.name)}</td><td style="padding:8px 12px;border-top:1px solid #e2e8f0;font-family:monospace;font-weight:700;color:#ff7400;text-align:right">${escape(e.passNo)}</td></tr>`)
     .join("");
-  return notify(
+  return send("ENTRY_PASS", context,
     to,
     `Tournament Entry Pass${many ? "es" : ""} — ${s.tournament}`,
     await layout(
@@ -209,37 +136,43 @@ export async function sendEntryPasses(to: string, s: { fullName: string; student
 }
 
 /**
- * Email a registration verification code; returns the delivery status and the mail server's Message-ID.
- * Without SMTP (local development only) the code is written to the console so it can be tested;
- * in production that is refused instead.
+ * Email a registration verification code (one email per code: its key is the challenge id). Returns
+ * how it went for the OTP limits; anything that means the user won't get the code is an error for them.
+ * The code is never recorded or logged in production (the audit keeps a neutral subject).
  */
-export async function sendEmailOtp(to: string, otp: string, validMinutes: number): Promise<{ status: "SENT" | "NOT_CONFIGURED"; messageId: string }> {
-  if (!smtpConfigured()) {
-    if (env.isProduction) throw new HttpError(503, "Email verification is not available right now. Please contact the organiser.");
-    console.log(`[mailer] SMTP not configured (development) — email OTP for ${to}: ${otp}`);
-    return { status: "NOT_CONFIGURED", messageId: "" };
-  }
-
+export async function sendEmailOtp(to: string, otp: string, validMinutes: number, challengeId: string, ip: string): Promise<{ status: "SENT" | "NOT_CONFIGURED"; messageId: string }> {
   const html = await layout(
     "Email verification",
     `<p>Use this code to verify your email address for registration. It expires in <strong>${validMinutes} minutes</strong>.</p>
      <p style="text-align:center;margin:28px 0;font-size:32px;font-weight:700;letter-spacing:10px;color:#ff7400">${otp}</p>
      <p>If you did not start a registration, you can ignore this email. Never share this code with anyone.</p>`,
   );
-  try {
-    return { status: "SENT", messageId: await sendMail({ to, subject: `${otp} is your email verification code`, html }) };
-  } catch (err) {
-    if (err instanceof SuppressedRecipientError) {
-      throw new HttpError(400, `We can't send email to this address because ${suppressionText(err.reason)}. Please use a different email address.`);
-    }
-    // Log the failure, never the code.
-    console.error(`[mailer] Could not send email OTP to ${to}:`, (err as Error).message);
-    throw new HttpError(502, "We couldn't send the code to this email address. Check it and try again.");
+  const delivery = await deliverEmail({
+    kind: "OTP", to, subject: `${otp} is your email verification code`, auditSubject: "Email verification code", html,
+    context: { trigger: "SELF", actor: ip ? `${to} (IP ${ip})` : to, idempotencyKey: `otp:${challengeId}` },
+  });
+  switch (delivery.status) {
+    case "SENT":
+    case "UNCERTAIN": // very likely delivered; asking for another code would only cost more
+    case "DUPLICATE":
+      return { status: "SENT", messageId: delivery.id ?? "" };
+    case "LOGGED":
+      return { status: "NOT_CONFIGURED", messageId: delivery.id ?? "" };
+    case "NOT_CONFIGURED":
+      throw new HttpError(503, "Email verification is not available right now. Please contact the organiser.");
+    case "SUPPRESSED":
+      throw new HttpError(400, `We can't send email to this address because ${suppressionText(delivery.error)}. Please use a different email address.`);
+    case "HELD":
+    case "LIMITED":
+      throw new HttpError(503, "Email verification is temporarily unavailable because today's email limit was reached. Please try again later or contact the organiser.");
+    default:
+      throw new HttpError(502, "We couldn't send the code to this email address. Check it and try again.");
   }
 }
 
-export async function sendPasswordReset(to: string, setPasswordUrl: string) {
-  await notify(
+/** Each request is its own email (no idempotency key); the reset link is never recorded. */
+export async function sendPasswordReset(to: string, setPasswordUrl: string, context: EmailContext) {
+  return send("PASSWORD_RESET", context,
     to,
     "Reset your password",
     await layout(

@@ -13,7 +13,7 @@ export interface ImportJob<R = unknown> {
   owner: string;
   status: "RUNNING" | "DONE" | "FAILED";
   /** CHECKING (validating rows) | SAVING */
-  phase: "CHECKING" | "SAVING";
+  phase: "CHECKING" | "SAVING" | "EMAILING";
   total: number;
   done: number;
   result: R | null;

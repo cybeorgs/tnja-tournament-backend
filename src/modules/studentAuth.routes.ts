@@ -95,7 +95,7 @@ studentAuthRouter.post("/forgot-password", resetPerIp, resetPerEmail, async (req
     const account =
       (await prisma.studentAccount.findUnique({ where: { email: input.email } })) ??
       (await prisma.studentAccount.create({ data: { email: input.email, passwordHash: await unusablePasswordHash() } }));
-    await sendPasswordReset(input.email, passwordLink(account, "reset"));
+    await sendPasswordReset(input.email, passwordLink(account, "reset"), { trigger: "SELF", actor: input.email });
   })().catch((err) => console.error("[forgot password] failed:", err));
   res.json({ message: "If this email is registered, we've sent a link to set a new password." });
 });

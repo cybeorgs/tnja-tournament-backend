@@ -16,6 +16,7 @@ import aadhaarRoutes from "./modules/aadhaar.routes.js";
 import { studentAuthRouter, studentRouter } from "./modules/studentAuth.routes.js";
 import paymentRoutes from "./modules/payments.routes.js";
 import auditRoutes from "./modules/audit.routes.js";
+import emailRoutes from "./modules/email.routes.js";
 
 export function createApp() {
   const app = express();
@@ -47,6 +48,7 @@ export function createApp() {
   admin.use("/draws", drawsRouter);
   admin.use("/payments", paymentRoutes);
   admin.use("/audit", auditRoutes);
+  admin.use("/email", emailRoutes);
   app.use("/api", admin);
 
   app.use("/api", (_req, res) => {

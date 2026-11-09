@@ -97,7 +97,7 @@ async function recordPayment(tournamentId: string, studentId: string, orderId: s
       }),
     ),
   );
-  sendEntryPassesLater(tournamentId, studentId);
+  sendEntryPassesLater(tournamentId, studentId, { trigger: "PAYMENT", actor: `Razorpay ${captured.id}` });
 }
 
 /** Record any earlier order of these entries that Razorpay says was paid (so nobody pays twice). */

@@ -325,8 +325,8 @@ router.post("/:id/registrations", async (req, res) => {
   });
   // A student created here gets the registration email (username, password, PDF). In a free
   // event the Tournament Entry Pass is emailed now; otherwise once it is paid.
-  if (createdStudent) emailRegistrationLater(createdStudent);
-  if (registrations[0]) sendEntryPassesLater(tournament.id, registrations[0].studentId);
+  if (createdStudent) emailRegistrationLater(createdStudent, { trigger: "ADMIN", actor: req.admin?.username || "admin" });
+  if (registrations[0]) sendEntryPassesLater(tournament.id, registrations[0].studentId, { trigger: "ADMIN", actor: req.admin?.username || "admin" });
   res.status(201).json(input.ageGroups ? registrations : registrations[0]);
 });
 
@@ -420,7 +420,7 @@ router.patch("/:id/registrations/:regId/payment", async (req, res) => {
     ? { paymentStatus: "PAID", paymentMode: input.mode, amountPaid: existing.fee, paidAt: new Date() }
     : { paymentStatus: "PENDING", paymentMode: null, amountPaid: 0, paidAt: null };
   const saved = await prisma.registration.update({ where: { id: existing.id }, data, include: { student: true } });
-  if (input.status === "PAID") sendEntryPassesLater(tournamentId, existing.studentId);
+  if (input.status === "PAID") sendEntryPassesLater(tournamentId, existing.studentId, { trigger: "ADMIN", actor: req.admin?.username || "admin" });
   res.json(saved);
 });
 

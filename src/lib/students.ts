@@ -193,6 +193,7 @@ export async function createStudent(
     documents = [],
     bulkImport: _bulkImport = false,
     actor,
+    note,
   }: {
     source?: "ADMIN" | "SELF";
     documents?: StudentUpload[];
@@ -200,6 +201,8 @@ export async function createStudent(
     bulkImport?: boolean;
     /** Who is adding the student, for the audit log (the student themselves when source is SELF) */
     actor?: Actor;
+    /** Replaces the default history note (e.g. an import saying whether emails were sent) */
+    note?: string;
   } = {},
 ) {
   await assertAadhaarFree(tx, data.aadhaarNumber);
@@ -209,7 +212,7 @@ export async function createStudent(
   });
   for (const doc of documents) await tx.studentDocument.create({ data: { studentId: student.id, ...doc } });
   const by: Actor = actor ?? (source === "SELF" ? { type: "STUDENT", name: student.email } : { type: _bulkImport ? "IMPORT" : "ADMIN", name: "admin" });
-  await recordStudentAudit(tx, student, "CREATED", by, { note: source === "SELF" ? "Registered on the website" : _bulkImport ? "Imported from a spreadsheet" : "Added by an admin" });
+  await recordStudentAudit(tx, student, "CREATED", by, { note: note ?? (source === "SELF" ? "Registered on the website" : _bulkImport ? "Imported from a spreadsheet" : "Added by an admin") });
   return student;
 }
 
