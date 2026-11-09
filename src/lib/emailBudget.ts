@@ -6,7 +6,7 @@
 //   EMAIL_DAILY_LIMIT_OTP, EMAIL_DAILY_LIMIT_REGISTRATION, EMAIL_DAILY_LIMIT_ENTRY_PASS,
 //   EMAIL_DAILY_LIMIT_PASSWORD_RESET, EMAIL_DAILY_LIMIT_ADMIN
 // Unset or empty = no limit (usage is still counted and shown to admins). 0 = that category is off.
-// An admin can allow extra emails for today (an "override") from Admin → Emails.
+// Limits can only be changed in .env (then restart the backend): there is no override in the website.
 import prisma from "../db.js";
 
 export const EMAIL_CATEGORIES = ["OTP", "REGISTRATION", "ENTRY_PASS", "PASSWORD_RESET", "ADMIN"] as const;
@@ -52,7 +52,7 @@ export async function reserveEmail(category: EmailCategory, day = budgetDay()): 
         WHERE "day" = ${day} AND "category" = ${category} RETURNING "sent"`
     : await prisma.$queryRaw<{ sent: number }[]>`
         UPDATE "EmailDailyUsage" SET "sent" = "sent" + 1, "updatedAt" = now()
-        WHERE "day" = ${day} AND "category" = ${category} AND "sent" < ${limit} + "extraAllowance"
+        WHERE "day" = ${day} AND "category" = ${category} AND "sent" < ${limit}
         RETURNING "sent"`;
   return rows.length > 0;
 }
@@ -64,16 +64,7 @@ export async function releaseEmail(category: EmailCategory, day: string) {
     WHERE "day" = ${day} AND "category" = ${category}`;
 }
 
-/** Lets `extra` more emails of this category go today, on top of the limit. */
-export async function allowExtraToday(category: EmailCategory, extra: number, grantedBy: string) {
-  const day = budgetDay();
-  await ensureRow(day, category);
-  await prisma.$executeRaw`
-    UPDATE "EmailDailyUsage" SET "extraAllowance" = "extraAllowance" + ${extra}, "extraGrantedBy" = ${grantedBy}, "updatedAt" = now()
-    WHERE "day" = ${day} AND "category" = ${category}`;
-}
-
-export type BudgetStatus = { category: EmailCategory; label: string; limit: number | null; extra: number; extraGrantedBy: string; sent: number; remaining: number | null };
+export type BudgetStatus = { category: EmailCategory; label: string; limit: number | null; sent: number; remaining: number | null };
 
 /** Today's usage, limit and remaining emails for every category. */
 export async function budgetToday(): Promise<BudgetStatus[]> {
@@ -83,7 +74,6 @@ export async function budgetToday(): Promise<BudgetStatus[]> {
     const row = rows.find((r) => r.category === category);
     const limit = dailyLimit(category);
     const sent = row?.sent ?? 0;
-    const extra = row?.extraAllowance ?? 0;
-    return { category, label: CATEGORY_LABEL[category], limit, extra, extraGrantedBy: row?.extraGrantedBy ?? "", sent, remaining: limit === null ? null : Math.max(0, limit + extra - sent) };
+    return { category, label: CATEGORY_LABEL[category], limit, sent, remaining: limit === null ? null : Math.max(0, limit - sent) };
   });
 }

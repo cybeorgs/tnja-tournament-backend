@@ -401,13 +401,13 @@ model EmailMessage {
 }
 
 /// Emails used per day (India time) per budget category, counted atomically so several server
-/// processes can't overshoot a daily limit together. Limits come from EMAIL_DAILY_LIMIT_* env vars.
+/// processes can't overshoot a daily limit together. Limits come only from EMAIL_DAILY_LIMIT_* env vars.
 model EmailDailyUsage {
   /// YYYY-MM-DD in Asia/Kolkata
   day            String
   category       String
   sent           Int      @default(0)
-  /// Extra emails an admin allowed today above the limit
+  /// Unused (an earlier admin override, removed: limits are set only in .env)
   extraAllowance Int      @default(0)
   extraGrantedBy String   @default("")
   updatedAt      DateTime @updatedAt

@@ -4,7 +4,7 @@ import { Router } from "express";
 import { z } from "zod";
 import prisma from "../db.js";
 import { HttpError } from "../middleware/errors.js";
-import { EMAIL_CATEGORIES, allowExtraToday, budgetToday } from "../lib/emailBudget.js";
+import { EMAIL_CATEGORIES, budgetToday } from "../lib/emailBudget.js";
 import { HOLDABLE_KINDS } from "../lib/emailService.js";
 import { isProductionDeployment, transportMode } from "../lib/emailTransport.js";
 import { normaliseEmail } from "../lib/emailAddress.js";
@@ -55,17 +55,9 @@ router.get("/messages", async (req, res) => {
   res.json({ items, total, page, pageSize });
 });
 
-/** Override: let `extra` more emails of a category go today, above its limit. */
-router.post("/budget/extra", async (req, res) => {
-  const { category, extra } = z.object({ category: z.enum(EMAIL_CATEGORIES), extra: z.coerce.number().int().min(1).max(10_000) }).parse(req.body);
-  await allowExtraToday(category, extra, adminName(req));
-  console.warn(`[email] ${adminName(req)} allowed ${extra} extra ${category} emails today`);
-  res.json({ budgets: await budgetToday() });
-});
-
 /**
- * Send the emails held by the daily limit, oldest first. Each still has to fit today's budget (allow
- * extra first if needed); any that don't stay held. Each is regenerated (fresh PDF) and sent once.
+ * Send the emails held by the daily limit, oldest first. Each still has to fit today's limit (raise it in
+ * .env and restart, or wait for tomorrow); any that don't fit stay held. Each is regenerated (fresh PDF) and sent once.
  */
 router.post("/held/send", async (req, res) => {
   const { max } = z.object({ max: z.coerce.number().int().min(1).max(1000).default(200) }).parse(req.body ?? {});

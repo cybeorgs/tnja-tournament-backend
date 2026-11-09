@@ -9,7 +9,7 @@ import prisma from "../db.js";
 import { env } from "../config/env.js";
 import { setTransportForTests, type OutgoingMessage, type SmtpError } from "./emailTransport.js";
 import { deliverEmail, type EmailKind } from "./emailService.js";
-import { allowExtraToday, budgetDay } from "./emailBudget.js";
+import { budgetDay } from "./emailBudget.js";
 
 const dbUp = await prisma.$queryRaw`SELECT 1`.then(() => true, () => false);
 
@@ -134,20 +134,20 @@ describe("email service (database)", { skip: !dbUp && "local database not reacha
     assert.equal(second.id, first.id, "same audit row, not a second email record");
   });
 
-  it("enforces the daily limit atomically under concurrent sends, holds the rest, and lets an admin override", async () => {
+  it("enforces the daily limit atomically under concurrent sends, holds the rest, and sends more only when .env allows", async () => {
     behaviour = async () => { await new Promise((r) => setTimeout(r, 20)); return { messageId: "<fake>" }; };
     const used = (await prisma.emailDailyUsage.findUnique({ where: { day_category: { day: budgetDay(), category: "ENTRY_PASS" } } }))?.sent ?? 0;
-    const extra = (await prisma.emailDailyUsage.findUnique({ where: { day_category: { day: budgetDay(), category: "ENTRY_PASS" } } }))?.extraAllowance ?? 0;
-    process.env.EMAIL_DAILY_LIMIT_ENTRY_PASS = String(Math.max(0, used + 2 - extra)); // room for exactly 2 more
+    process.env.EMAIL_DAILY_LIMIT_ENTRY_PASS = String(used + 2); // room for exactly 2 more
     const results = await Promise.all(Array.from({ length: 8 }, (_, i) => email("ENTRY_PASS", addr(`budget-${i}`), `test:${run}:budget:${i}`)));
     assert.equal(results.filter((r) => r.status === "SENT").length, 2, "exactly the limit");
     const held = results.filter((r) => r.status === "HELD");
     assert.equal(held.length, 6, "the rest are held, not dropped");
 
-    await allowExtraToday("ENTRY_PASS", 1, "test-admin");
+    // Only raising the limit (in .env) lets more through.
+    process.env.EMAIL_DAILY_LIMIT_ENTRY_PASS = String(used + 3);
     const i = results.findIndex((r) => r.status === "HELD");
     const released = await email("ENTRY_PASS", addr(`budget-${i}`), `test:${run}:budget:${i}`);
-    assert.equal(released.status, "SENT", "one more after the override");
+    assert.equal(released.status, "SENT", "one more after the limit is raised");
     const j = results.findIndex((r, k) => r.status === "HELD" && k !== i);
     assert.equal((await email("ENTRY_PASS", addr(`budget-${j}`), `test:${run}:budget:${j}`)).status, "HELD", "and no more than that");
   });

@@ -34,7 +34,7 @@ on the same Brevo account.
 3. **Suppression list.** Addresses that hard-bounced, were blocked or invalid, complained (spam) or
    unsubscribed are never emailed (`EmailSuppression`; filled from SMTP rejections and the Brevo webhook).
 4. **Daily budget.** One email is taken from the category's daily limit with an atomic
-   `UPDATE … WHERE sent < limit + extra`. That is safe across several server processes.
+   `UPDATE … WHERE sent < limit`. That is safe across several server processes.
 5. **SMTP**, with the single retry layer (below).
 6. **Outcome recorded:** `SENT`, `FAILED`, `SUPPRESSED`, `HELD`, `LIMITED`, `UNCERTAIN` or `LOGGED`.
 
@@ -97,10 +97,11 @@ EMAIL_DAILY_LIMIT_ADMIN=
 ```
 
 - Empty means no limit (still counted and shown); `0` switches that type off. Days reset at midnight, India time.
+- Limits can **only** be changed in `.env` (then restart the backend). There is no override in the website or the API.
 - Over the limit:
   - registration, application, approval and entry-pass emails are **HELD**. They appear on
-    **Admin → Emails**, where an admin can "Allow more today" (recorded with their username) and
-    "Send held emails". Each is regenerated fresh and sent once.
+    **Admin → Emails** with a "Send held emails" button, which sends them once there's room (the
+    next day, or after the limit is raised in `.env`). Each is regenerated fresh and sent once.
   - Verification codes and password resets are only useful straight away, so they're **refused**
     (`LIMITED`). The person sees "temporarily unavailable, try later". OTP failures don't count
     against their OTP limits.
