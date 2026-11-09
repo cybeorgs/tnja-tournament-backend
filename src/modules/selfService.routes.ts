@@ -5,6 +5,7 @@
 // emailed to them. Approved students enter tournaments in one or more age groups (e.g. a cadet in
 // Cadet, Junior and Senior), usually in the registration form itself. Each entry is charged the entry fee.
 // Referees register themselves as officials of a tournament the same way (no fee).
+import crypto from "crypto";
 import { Router } from "express";
 import { z } from "zod";
 import prisma from "../db.js";
@@ -16,7 +17,9 @@ import { confirmResidency, createStudent, decodeUpload, studentSchema, type Stud
 import { ensureAccount } from "../lib/accounts.js";
 import { TN_LOCATIONS, lookupPincode } from "../lib/locations.js";
 import { emailRegistrationNow, tempIdOf } from "../lib/registrationEmails.js";
-import { assertEmailVerified, checkEmailOtp, createEmailOtp, createEmailVerifiedToken } from "../lib/emailOtp.js";
+import { OTP_VALID_MINUTES, assertEmailVerified, checkEmailOtp, createEmailOtp, createEmailVerifiedToken, recordDelivery } from "../lib/emailOtp.js";
+import { domainAcceptsMail, emailProblem, normaliseEmail, suggestEmail } from "../lib/emailAddress.js";
+import { brevoSuppression, suppress, suppressionOf, suppressionText } from "../lib/emailSuppression.js";
 import { sendEmailOtp } from "../lib/mailer.js";
 import { assertAadhaarVerified } from "../lib/aadhaar.js";
 import { closedReason, newEntryTerms, repriceEntries } from "../lib/fees.js";
@@ -101,8 +104,15 @@ router.post("/students/register", registerLimiter, async (req, res) => {
     : [];
   const certificateNos = await Promise.all(categories.map(() => newCertificateNo()));
 
-  // The student, their account and their entries are created together.
+  // The student, their account and their entries are created together. The same form submitted twice at
+  // once (a double click, a retry on a slow connection) is serialised on the Aadhaar number: the second
+  // finds the first and is refused, so there's never a second student or a second registration email.
   const { student, account } = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(hashtext(${`register:${data.aadhaarNumber}`}))`;
+    // (Same wording as the check above: never reveal the other student's ID.)
+    if (await tx.student.findUnique({ where: { aadhaarNumber: data.aadhaarNumber }, select: { id: true } })) {
+      throw new HttpError(409, "This Aadhaar number is already registered. Log in with your email to register for tournaments.");
+    }
     const created = await createStudent(tx, data, { source: "SELF", documents });
     if (tournament && created.status === "APPROVED") {
       for (const [i, category] of categories.entries()) {
@@ -134,23 +144,99 @@ router.post("/students/register", registerLimiter, async (req, res) => {
 // The Verify button next to the email: a 6-digit code is emailed, and checking it returns a token that
 // the registration must carry.
 
-const otpSendLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 8 });
+// Coarse burst guards per IP, ahead of the database-backed OTP policy in emailOtp.ts (cooldowns,
+// 3 per email per 15 min, 10 per IP an hour / 30 a day), which is the real limit.
+const otpSendLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20 });
 const otpVerifyLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30 });
-const otpEmail = z.email("Enter a valid email address").max(254);
+
+/**
+ * The address, normalised, if we may send it a code: well-formed, not a likely typo (unless the user
+ * confirmed it), its domain accepts mail, and it isn't on the suppression list.
+ */
+async function sendableEmail(raw: string, confirmTypo: boolean) {
+  const address = normaliseEmail(raw);
+  const problem = emailProblem(address);
+  if (problem) throw new HttpError(400, problem);
+  const suggestion = suggestEmail(address);
+  if (suggestion && !confirmTypo) {
+    throw new HttpError(400, `Did you mean ${suggestion}? Check the address before we send the code.`, { code: "EMAIL_TYPO", suggestion });
+  }
+  if (!(await domainAcceptsMail(address))) {
+    throw new HttpError(400, `${address.slice(address.indexOf("@") + 1)} can't receive email. Please check the address.`);
+  }
+  const suppressed = await suppressionOf(address);
+  if (suppressed) {
+    throw new HttpError(400, `We can't send email to this address because ${suppressionText(suppressed.reason)}. Please use a different email address.`);
+  }
+  return address;
+}
+
+const otpSendSchema = z.object({
+  email: z.string({ error: "Please enter your email address." }).max(320, "Email address is too long."),
+  /** The user saw the "did you mean …?" suggestion and kept what they typed */
+  confirmTypo: z.boolean().default(false),
+});
 
 /** Email a 6-digit code; the returned token goes back with the code to /verify. */
 router.post("/email-otp/send", otpSendLimiter, async (req, res) => {
-  const address = otpEmail.parse(req.body?.email);
-  const { otp, token } = createEmailOtp(address);
-  await sendEmailOtp(address, otp);
-  res.json({ token });
+  const { email: raw, confirmTypo } = otpSendSchema.parse(req.body ?? {});
+  const address = await sendableEmail(raw, confirmTypo);
+  const challenge = await createEmailOtp(address, req.ip ?? "");
+  let delivery: Awaited<ReturnType<typeof sendEmailOtp>>;
+  try {
+    delivery = await sendEmailOtp(address, challenge.code, OTP_VALID_MINUTES);
+  } catch (err) {
+    // Not sent, so it doesn't count against the user's limits.
+    await recordDelivery(challenge.id, { status: "FAILED" });
+    throw err;
+  }
+  const resendAfter = await recordDelivery(challenge.id, delivery);
+  // Never the code itself: only the id it must be verified against.
+  res.json({ token: challenge.id, email: address, expiresIn: challenge.expiresIn, resendAfter });
 });
 
 router.post("/email-otp/verify", otpVerifyLimiter, async (req, res) => {
-  const { email: address, otp, token } = z.object({ email: otpEmail, otp: z.string().trim().regex(/^\d{6}$/, "Enter the 6-digit code"), token: z.string() }).parse(req.body);
-  const problem = checkEmailOtp(token, address, otp);
+  const { email: raw, otp, token } = z
+    .object({ email: z.string().max(320), otp: z.string().trim().regex(/^\d{6}$/, "Enter the 6-digit code"), token: z.string() })
+    .parse(req.body);
+  const address = normaliseEmail(raw);
+  const problem = await checkEmailOtp(token, address, otp);
   if (problem) throw new HttpError(400, problem);
   res.json({ verificationToken: createEmailVerifiedToken(address) });
+});
+
+// ─── Email provider events ───────────────────────────────────────────────────
+// Brevo (Transactional → Settings → Webhooks) posts each email event here, one JSON object per event.
+// Hard bounces, blocked, invalid email, spam and unsubscribes put the address on the suppression list
+// (see brevoSuppression); all other events are acknowledged and ignored. Set BREVO_WEBHOOK_TOKEN and
+// register either
+//   https://<api host>/api/public/email-events/brevo?token=<BREVO_WEBHOOK_TOKEN>
+// or the URL without ?token= and bearer authentication with the same token (keeps it out of URLs/logs).
+// Without the token set, the endpoint doesn't exist.
+
+const sameSecret = (given: string, expected: string) => {
+  const a = Buffer.from(given);
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+};
+
+router.post("/email-events/brevo", rateLimit({ windowMs: 60 * 1000, max: 3000 }), async (req, res) => {
+  const secret = process.env.BREVO_WEBHOOK_TOKEN;
+  if (!secret) throw notFound("Endpoint");
+  const bearer = /^Bearer\s+(.+)$/i.exec(req.get("authorization") ?? "")?.[1]?.trim() ?? "";
+  const query = typeof req.query.token === "string" ? req.query.token : "";
+  if (!sameSecret(bearer, secret) && !sameSecret(query, secret)) throw new HttpError(401, "Unauthorized.");
+
+  const payloads: unknown[] = Array.isArray(req.body) ? req.body : [req.body];
+  let suppressed = 0;
+  for (const payload of payloads) {
+    const hit = brevoSuppression(payload);
+    if (!hit) continue;
+    await suppress(hit.email, hit.reason, "BREVO_WEBHOOK", hit.detail);
+    suppressed++;
+  }
+  // Always 200 for a valid call, so Brevo doesn't keep re-sending events we chose to ignore.
+  res.json({ ok: true, suppressed });
 });
 
 // ─── Locations ───────────────────────────────────────────────────────────────

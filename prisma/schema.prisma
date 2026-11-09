@@ -321,6 +321,46 @@ model EmailLog {
   @@index([tournamentId, studentId])
 }
 
+/// One emailed verification code. Kept in the database (not in memory) so the resend cooldowns and
+/// per-email / per-IP limits hold across restarts and server processes. Only an HMAC of the code is stored.
+model EmailOtpChallenge {
+  id          String    @id @default(uuid())
+  /// Normalised (trimmed, lower-case)
+  email       String
+  /// HMAC-SHA256 of the code, keyed with a server secret. The code itself is never stored or logged.
+  codeHash    String
+  /// Requesting IP, for the per-IP limits
+  ip          String    @default("")
+  expiresAt   DateTime
+  /// Wrong (and right) guesses so far; the challenge locks at 5
+  attempts    Int       @default(0)
+  consumedAt  DateTime?
+  /// Set when a newer code is sent to the same email: this one then stops working
+  supersededAt DateTime?
+  /// PENDING | SENT | FAILED | NOT_CONFIGURED. Failed sends don't count towards the limits.
+  deliveryStatus String @default("PENDING")
+  /// The mail server's Message-ID, to match against provider (Brevo) logs
+  messageId   String    @default("")
+  createdAt   DateTime  @default(now())
+
+  @@index([email, createdAt])
+  @@index([ip, createdAt])
+}
+
+/// Addresses we must not email: hard bounces, blocked or invalid recipients, spam complaints,
+/// unsubscribes. Checked before every send; filled from SMTP rejections and the Brevo webhook.
+model EmailSuppression {
+  /// Normalised (trimmed, lower-case)
+  email     String   @id
+  /// HARD_BOUNCE | BLOCKED | INVALID | SPAM | UNSUBSCRIBED
+  reason    String
+  /// SMTP | BREVO_WEBHOOK | ADMIN
+  source    String
+  detail    String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 /// Permanent, append-only history of every change to a student record: who did it, when, and what
 /// changed. The database refuses UPDATE, DELETE and TRUNCATE on this table (a trigger, see the
 /// migration), so no one — not even an admin or the app itself — can edit or remove an entry.

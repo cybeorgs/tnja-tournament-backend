@@ -2,6 +2,7 @@ import nodemailer, { type Transporter } from "nodemailer";
 import { env } from "../config/env.js";
 import { HttpError } from "../middleware/errors.js";
 import { getSettings } from "./helpers.js";
+import { suppress, suppressionOf, suppressionText } from "./emailSuppression.js";
 
 let transporter: Transporter | null = null;
 
@@ -20,7 +21,29 @@ export function checkMailSetup() {
 
 export type Attachment = { filename: string; content: Buffer; contentType: string };
 
-async function sendMail(message: { to: string; subject: string; html: string; attachments?: Attachment[] }) {
+/** The address is on the suppression list (bounced, blocked, spam complaint…): nothing was sent. */
+export class SuppressedRecipientError extends Error {
+  constructor(public reason: string) {
+    super(`Not sent: the address is suppressed (${reason}).`);
+  }
+}
+
+// Temporary failures (busy server, dropped connection, SMTP 4xx) get at most 2 more tries, spaced out.
+const RETRY_DELAYS_MS = [1000, 3000];
+const TEMPORARY_CODES = new Set(["ECONNECTION", "ETIMEDOUT", "ESOCKET", "ECONNRESET", "EDNS"]);
+type SmtpError = Error & { code?: string; responseCode?: number };
+const isTemporary = (err: SmtpError) => TEMPORARY_CODES.has(err.code ?? "") || (!!err.responseCode && err.responseCode >= 400 && err.responseCode < 500);
+// The server refused this recipient outright (550 mailbox unavailable, 551/553 bad address). Not our
+// login or the message, which have other codes: only these mean "never send to this address again".
+const isRecipientRejected = (err: SmtpError) => err.code === "EENVELOPE" && [550, 551, 553].includes(err.responseCode ?? 0);
+
+/**
+ * Sends one email and returns the mail server's Message-ID. Suppressed addresses are never sent to;
+ * a recipient the server rejects is suppressed (and not retried); temporary failures are retried twice.
+ */
+async function sendMail(message: { to: string; subject: string; html: string; attachments?: Attachment[] }): Promise<string> {
+  const suppressed = await suppressionOf(message.to);
+  if (suppressed) throw new SuppressedRecipientError(suppressed.reason);
   const settings = await getSettings();
   transporter ??= nodemailer.createTransport({
     host: env.smtp.host,
@@ -29,7 +52,22 @@ async function sendMail(message: { to: string; subject: string; html: string; at
     requireTLS: env.smtp.port !== 465,
     auth: { user: env.smtp.user, pass: env.smtp.pass },
   });
-  await transporter.sendMail({ from: `"${env.smtp.fromName || settings.orgName}" <${env.smtp.fromEmail}>`, ...message });
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const info = await transporter.sendMail({ from: `"${env.smtp.fromName || settings.orgName}" <${env.smtp.fromEmail}>`, ...message });
+      return String(info.messageId ?? "");
+    } catch (err) {
+      const e = err as SmtpError;
+      if (isRecipientRejected(e)) {
+        await suppress(message.to, e.responseCode === 550 ? "HARD_BOUNCE" : "INVALID", "SMTP", e.message);
+        throw err;
+      }
+      const delay = RETRY_DELAYS_MS[attempt];
+      if (delay === undefined || !isTemporary(e)) throw err;
+      console.warn(`[mailer] Temporary failure sending "${message.subject}" (${e.code ?? e.responseCode}); retry ${attempt + 1} of ${RETRY_DELAYS_MS.length} in ${delay / 1000}s`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
 }
 
 const escape = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
@@ -79,6 +117,10 @@ async function notify(to: string, subject: string, html: string, attachments?: A
     await sendMail({ to, subject, html, attachments });
     return { to, subject, status: "SENT", error: "" };
   } catch (err) {
+    if (err instanceof SuppressedRecipientError) {
+      console.warn(`[mailer] Skipped "${subject}" to ${to}: suppressed (${err.reason})`);
+      return { to, subject, status: "FAILED", error: `Not sent: ${suppressionText(err.reason)}.` };
+    }
     console.error(`[mailer] Could not send "${subject}" to ${to}:`, err);
     return { to, subject, status: "FAILED", error: err instanceof Error ? err.message.slice(0, 500) : "Unknown error" };
   }
@@ -166,24 +208,32 @@ export async function sendEntryPasses(to: string, s: { fullName: string; student
   );
 }
 
-/** Email a registration verification code. Without SMTP (outside production) the code is logged instead. */
-export async function sendEmailOtp(to: string, otp: string) {
+/**
+ * Email a registration verification code; returns the delivery status and the mail server's Message-ID.
+ * Without SMTP (local development only) the code is written to the console so it can be tested;
+ * in production that is refused instead.
+ */
+export async function sendEmailOtp(to: string, otp: string, validMinutes: number): Promise<{ status: "SENT" | "NOT_CONFIGURED"; messageId: string }> {
   if (!smtpConfigured()) {
     if (env.isProduction) throw new HttpError(503, "Email verification is not available right now. Please contact the organiser.");
-    console.log(`[mailer] SMTP not configured — email OTP for ${to}: ${otp}`);
-    return;
+    console.log(`[mailer] SMTP not configured (development) — email OTP for ${to}: ${otp}`);
+    return { status: "NOT_CONFIGURED", messageId: "" };
   }
 
   const html = await layout(
     "Email verification",
-    `<p>Use this code to verify your email address for student registration. It expires in <strong>10 minutes</strong>.</p>
+    `<p>Use this code to verify your email address for registration. It expires in <strong>${validMinutes} minutes</strong>.</p>
      <p style="text-align:center;margin:28px 0;font-size:32px;font-weight:700;letter-spacing:10px;color:#ff7400">${otp}</p>
      <p>If you did not start a registration, you can ignore this email. Never share this code with anyone.</p>`,
   );
   try {
-    await sendMail({ to, subject: `${otp} is your email verification code`, html });
+    return { status: "SENT", messageId: await sendMail({ to, subject: `${otp} is your email verification code`, html }) };
   } catch (err) {
-    console.error("[mailer] Could not send email OTP:", err);
+    if (err instanceof SuppressedRecipientError) {
+      throw new HttpError(400, `We can't send email to this address because ${suppressionText(err.reason)}. Please use a different email address.`);
+    }
+    // Log the failure, never the code.
+    console.error(`[mailer] Could not send email OTP to ${to}:`, (err as Error).message);
     throw new HttpError(502, "We couldn't send the code to this email address. Check it and try again.");
   }
 }

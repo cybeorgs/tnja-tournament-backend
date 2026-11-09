@@ -4,7 +4,8 @@ import { ZodError } from "zod";
 
 /** Thrown from route handlers to send a specific status and message. */
 export class HttpError extends Error {
-  constructor(public status: number, message: string) {
+  /** `extra` fields are sent alongside `error`, e.g. { retryAfter } for a countdown. */
+  constructor(public status: number, message: string, public extra?: Record<string, unknown>) {
     super(message);
   }
 }
@@ -13,7 +14,10 @@ export const notFound = (what: string) => new HttpError(404, `${what} not found.
 
 // Express 5 forwards rejected promises from async handlers here.
 export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
-  if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+  if (err instanceof HttpError) {
+    if (err.status === 429 && typeof err.extra?.retryAfter === "number") res.setHeader("Retry-After", err.extra.retryAfter);
+    return res.status(err.status).json({ ...err.extra, error: err.message });
+  }
 
   if (err instanceof ZodError) {
     const first = err.issues[0];
