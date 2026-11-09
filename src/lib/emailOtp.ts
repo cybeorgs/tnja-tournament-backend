@@ -4,7 +4,7 @@
 //
 // Policy (all enforced here, not just by the Resend button):
 //   • a code is 6 digits, valid for 5 minutes, single use
-//   • resend cooldown: 60 s after the 1st code, 120 s after the 2nd, 300 s after the 3rd
+//   • resend cooldown: 3 minutes after each code
 //   • at most 3 codes per email in any 15 minutes; at most 10 per IP an hour and 30 a day
 //   • a new code replaces the previous one, which stops working at once
 //   • 5 guesses per code, then it locks and a new code is needed
@@ -18,8 +18,8 @@ import { normaliseEmail } from "./emailAddress.js";
 export const OTP_VALID_MINUTES = 5;
 export const MAX_OTP_ATTEMPTS = 5;
 const OTP_VALID_MS = OTP_VALID_MINUTES * 60 * 1000;
-/** Wait before the next code, by how many codes were sent in the window (1st → 60 s, 2nd → 120 s, 3rd+ → 300 s). */
-export const RESEND_COOLDOWNS_S = [60, 120, 300];
+/** Wait before the next code, by how many codes were sent in the window (the last entry repeats): 3 minutes each time. */
+export const RESEND_COOLDOWNS_S = [180];
 export const EMAIL_WINDOW_MS = 15 * 60 * 1000;
 export const MAX_PER_EMAIL_WINDOW = 3;
 const HOUR_MS = 60 * 60 * 1000;

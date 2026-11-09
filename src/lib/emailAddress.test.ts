@@ -50,10 +50,10 @@ describe("OTP resend timing", () => {
   const t0 = Date.UTC(2026, 10, 9, 10, 0, 0);
   const at = (s: number) => new Date(t0 + s * 1000);
   it("sends the first code straight away", () => assert.equal(nextSendAt([], t0), t0));
-  it("waits 60 s after the first code", () => assert.equal(nextSendAt([at(0)]), t0 + 60_000));
-  it("waits 120 s after the second", () => assert.equal(nextSendAt([at(0), at(60)]), t0 + 180_000));
+  it("waits 3 minutes after the first code", () => assert.equal(nextSendAt([at(0)]), t0 + 180_000));
+  it("waits 3 minutes after the second", () => assert.equal(nextSendAt([at(0), at(180)]), t0 + 360_000));
   it("after 3 codes, waits until the first of them is 15 minutes old", () => {
-    // 3rd code at 180 s: 300 s cooldown would allow 480 s, but the 15-minute window allows only at 900 s.
-    assert.equal(nextSendAt([at(0), at(60), at(180)]), t0 + EMAIL_WINDOW_MS);
+    // 3rd code at 360 s: the 3-minute wait would allow 540 s, but the 15-minute window allows only at 900 s.
+    assert.equal(nextSendAt([at(0), at(180), at(360)]), t0 + EMAIL_WINDOW_MS);
   });
 });
