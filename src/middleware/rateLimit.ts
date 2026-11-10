@@ -68,12 +68,17 @@ const digitsOf = (value: unknown) => (typeof value === "string" ? value.replace(
 
 // Aadhaar verification through DigiLocker is billed per Sandbox call. Same limits as the main TNJA site:
 // per-IP limits are generous because a club may register many players from one office connection;
-// the per-Aadhaar limit stops one number being hammered.
+// the per-Aadhaar limits stop one number being hammered (a genuine student needs 1–2 sessions, since
+// /resume reuses a session for free). Status calls are also capped per session in aadhaar.routes.ts,
+// and every billed Sandbox call counts against SANDBOX_DAILY_CALL_LIMIT in lib/sandbox.ts.
 export const aadhaarLimits = {
   start: [
     rateLimit({ windowMs: HOUR_MS, max: 30, message: "Too many Aadhaar verification attempts from this network." }),
-    rateLimit({ windowMs: HOUR_MS, max: 5, key: (req) => digitsOf(req.body?.aadhaarNumber), message: "Too many verification attempts for this Aadhaar number." }),
+    rateLimit({ windowMs: HOUR_MS, max: 3, key: (req) => digitsOf(req.body?.aadhaarNumber), message: "Too many verification attempts for this Aadhaar number." }),
+    rateLimit({ windowMs: DAY_MS, max: Number(process.env.AADHAAR_PER_NUMBER_DAILY_LIMIT ?? 6) || Number.MAX_SAFE_INTEGER, key: (req) => digitsOf(req.body?.aadhaarNumber), message: "Too many verification attempts for this Aadhaar number today." }),
     dailyBudget("AADHAAR_DAILY_LIMIT", 500),
   ],
+  // Free (no Sandbox call), so only limited against scripted abuse.
+  resume: [rateLimit({ windowMs: 10 * MINUTE_MS, max: 60, message: "Too many verification attempts." })],
   check: [rateLimit({ windowMs: 10 * MINUTE_MS, max: 120, message: "Too many status checks." })],
 };

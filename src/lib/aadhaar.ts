@@ -6,7 +6,7 @@ import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env.js";
 import { HttpError } from "../middleware/errors.js";
-import { isSandboxConfigured } from "./sandbox.js";
+import { isSandboxConfigured, type AadhaarKycDetails } from "./sandbox.js";
 
 const SESSION_PURPOSE = "aadhaar-digilocker-session";
 const VERIFIED_PURPOSE = "aadhaar-verified";
@@ -34,6 +34,38 @@ export function normaliseAadhaarDob(raw: string | null | undefined): string | nu
 
 /** Whether the entered date of birth matches the Aadhaar (only the year, when that is all it records). */
 export const dobMatches = (aadhaarDob: string, entered: string) => (aadhaarDob.length === 4 ? entered.startsWith(aadhaarDob) : aadhaarDob === entered);
+
+/**
+ * Whether the Aadhaar fetched from DigiLocker belongs to what the student entered: the last 4 digits,
+ * the pincode of the Aadhaar address and the date of birth must all match. The error is safe to show
+ * (the student is looking at their own Aadhaar, so naming its pincode or date helps them fix the form).
+ */
+export function matchAadhaar(details: AadhaarKycDetails, aadhaar: string, pincode: string, dob: string): { ok: true } | { ok: false; error: string; aadhaarPincode?: string } {
+  // DigiLocker returns a masked number (e.g. xxxxxxxx1234).
+  const lastFour = (details.maskedAadhaar || "").replace(/\D/g, "").slice(-4);
+  if (lastFour.length !== 4 || lastFour !== aadhaar.slice(-4)) {
+    return { ok: false, error: "The Aadhaar in your DigiLocker account does not match the number you entered." };
+  }
+  if (!details.pincode) {
+    return { ok: false, error: "Your Aadhaar does not show a pincode, so it can't be matched. Please contact the TNJA office." };
+  }
+  if (details.pincode !== pincode) {
+    return {
+      ok: false,
+      error: `The pincode on your Aadhaar (${details.pincode}) does not match the pincode you entered (${pincode}). Change the pincode to the one on your Aadhaar and click Verify again.`,
+      aadhaarPincode: details.pincode,
+    };
+  }
+  const aadhaarDob = normaliseAadhaarDob(details.dateOfBirth);
+  if (!aadhaarDob) {
+    return { ok: false, error: "Your Aadhaar does not show a date of birth, so it can't be matched. Please contact the TNJA office." };
+  }
+  if (!dobMatches(aadhaarDob, dob)) {
+    const shown = aadhaarDob.length === 4 ? `year of birth (${aadhaarDob})` : `date of birth (${aadhaarDob.slice(8, 10)}/${aadhaarDob.slice(5, 7)}/${aadhaarDob.slice(0, 4)})`;
+    return { ok: false, error: `The ${shown} on your Aadhaar does not match the date of birth you entered. Change it to the one on your Aadhaar and click Verify again.` };
+  }
+  return { ok: true };
+}
 
 type Payload = jwt.JwtPayload & { purpose: string; aadhaar: string; pincode: string; dob?: string; sessionId?: string };
 

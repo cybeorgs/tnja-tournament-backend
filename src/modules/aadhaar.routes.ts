@@ -1,13 +1,23 @@
-// Aadhaar verification through DigiLocker (via Sandbox), with the same call limits as the main TNJA
-// site. The student signs in to DigiLocker in a popup and consents to share their Aadhaar; the form
-// then calls /check. Verification passes only when the Aadhaar's last 4 digits match the number
-// entered, the pincode on the Aadhaar address matches the residing pincode the student gave, AND the
-// date of birth on the Aadhaar matches the one entered.
+// Aadhaar verification through DigiLocker (via Sandbox). The student signs in to DigiLocker in a popup
+// and consents to share their Aadhaar; the form then calls /check. Verification passes only when the
+// Aadhaar's last 4 digits match the number entered, the pincode on the Aadhaar address matches the
+// residing pincode the student gave, AND the date of birth on the Aadhaar matches the one entered.
+//
+// Every Sandbox call is billed, so one student should cost init + status + document (3 calls) and
+// little more:
+// - Once Sandbox gives a final answer for a session (the Aadhaar, or "cancelled/expired"), it is kept
+//   here, so re-checks never call Sandbox again.
+// - /resume lets the same browser reuse its session for free: after a pincode or date-of-birth
+//   mismatch the corrected values are matched against the Aadhaar already fetched, and a popup closed
+//   too early reopens the same DigiLocker session instead of paying for a new one.
+// - Status calls per session are capped, whatever the client does.
+// Sessions live in memory (one API process, like the rate limits). After a restart, checks still
+// work statelessly from the signed session token; only the free reuse is lost.
 import { Router, type Request, type Response } from "express";
 import prisma from "../db.js";
 import { aadhaarLimits } from "../middleware/rateLimit.js";
-import { SandboxError, fetchDigilockerAadhaar, getDigilockerSessionStatus, initDigilockerSession, isSandboxConfigured } from "../lib/sandbox.js";
-import { createSessionToken, createVerifiedToken, dobMatches, isValidAadhaar, isValidDob, isValidPincode, normaliseAadhaarDob, readSessionToken } from "../lib/aadhaar.js";
+import { SandboxError, fetchDigilockerAadhaar, getDigilockerSessionStatus, initDigilockerSession, isSandboxConfigured, type AadhaarKycDetails } from "../lib/sandbox.js";
+import { createSessionToken, createVerifiedToken, isValidAadhaar, isValidDob, isValidPincode, matchAadhaar, readSessionToken } from "../lib/aadhaar.js";
 
 const router = Router();
 
@@ -17,6 +27,81 @@ function notConfigured(res: Response) {
 }
 
 const sandboxFailure = (res: Response, error: SandboxError) => res.status(error.status >= 500 ? 502 : 400).json({ error: error.message });
+
+// ─── Session store ───────────────────────────────────────────────────────────
+
+// Session tokens expire after 30 minutes, so nothing about a session is useful for longer.
+const SESSION_TTL_MS = 30 * 60 * 1000;
+// A session still waiting for the student is handed out again (instead of starting a new paid one)
+// only while DigiLocker will surely still accept it.
+const OPEN_SESSION_REUSE_MS = 8 * 60 * 1000;
+// Billed status calls one session may make. The form needs 1–3 (callback, popup closed, "I've
+// finished") plus a few slow safety polls; anything beyond this is a stuck or misbehaving client.
+const MAX_STATUS_CHECKS_PER_SESSION = 10;
+// Several tabs or clicks checking one session within this gap share one status call.
+const CHECK_MIN_GAP_MS = 4 * 1000;
+
+type CheckOutcome = { httpStatus: number; body: Record<string, unknown> };
+type Final = { kind: "aadhaar"; details: AadhaarKycDetails } | { kind: "failed"; outcome: CheckOutcome };
+
+interface SessionState {
+  aadhaarNumber: string;
+  /** Empty for sessions started before a restart */
+  authorizationUrl: string;
+  startedAt: number;
+  statusChecks: number;
+  lastCheckAt: number;
+  /** Sandbox's last word on this session; once set, no more Sandbox calls are made for it */
+  final?: Final;
+  inFlight?: Promise<CheckOutcome | null>;
+}
+
+const sessions = new Map<string, SessionState>();
+
+function pruneSessions(now: number) {
+  for (const [id, s] of sessions) if (now - s.startedAt > SESSION_TTL_MS) sessions.delete(id);
+}
+
+const failed = (httpStatus: number, error: string): CheckOutcome => ({ httpStatus, body: { error } });
+
+/** The answer for this student's entries, from a session whose Aadhaar or failure is already known. */
+function answer(final: Final, aadhaarNumber: string, pincode: string, dob: string): CheckOutcome {
+  if (final.kind === "failed") return final.outcome;
+  const match = matchAadhaar(final.details, aadhaarNumber, pincode, dob);
+  if (!match.ok) {
+    return { httpStatus: 400, body: { error: match.error, ...(match.aadhaarPincode ? { aadhaarPincode: match.aadhaarPincode } : {}) } };
+  }
+  return {
+    httpStatus: 200,
+    body: { status: "verified", aadhaarVerificationToken: createVerifiedToken(aadhaarNumber, pincode, dob), aadhaarDetails: { name: final.details.name } },
+  };
+}
+
+/** Asks Sandbox once. Sets `state.final` when the answer is final; otherwise returns what to tell the client. */
+async function askSandbox(sessionId: string, state: SessionState): Promise<CheckOutcome | null> {
+  try {
+    state.statusChecks++;
+    const status = await getDigilockerSessionStatus(sessionId);
+    if (status === "created") return { httpStatus: 200, body: { status: "pending" } };
+    if (status !== "succeeded") {
+      state.final = { kind: "failed", outcome: failed(400, "DigiLocker verification was cancelled or expired. Please click Verify again.") };
+      return null;
+    }
+    state.final = { kind: "aadhaar", details: await fetchDigilockerAadhaar(sessionId) };
+    return null;
+  } catch (error) {
+    if (error instanceof SandboxError) {
+      // 404: the student did not share Aadhaar in this session; only a new session can fix that.
+      if (error.status === 404) {
+        state.final = { kind: "failed", outcome: failed(400, error.message) };
+        return null;
+      }
+      return failed(error.status >= 500 ? 502 : 400, error.message);
+    }
+    console.error("Error checking DigiLocker verification:", error);
+    return failed(500, "Failed to verify Aadhaar.");
+  }
+}
 
 // ─── Start ───────────────────────────────────────────────────────────────────
 
@@ -43,9 +128,11 @@ router.post("/aadhaar/digilocker/start", aadhaarLimits.start, async (req: Reques
   }
   lastStartAt.set(aadhaarNumber, now);
   for (const [key, at] of lastStartAt) if (now - at > START_COOLDOWN_MS) lastStartAt.delete(key);
+  pruneSessions(now);
 
   try {
     const { sessionId, authorizationUrl } = await initDigilockerSession();
+    sessions.set(sessionId, { aadhaarNumber, authorizationUrl, startedAt: now, statusChecks: 0, lastCheckAt: 0 });
     res.json({ authorizationUrl, digilockerSessionToken: createSessionToken(aadhaarNumber, pincode, dob, sessionId) });
   } catch (error) {
     if (error instanceof SandboxError) return sandboxFailure(res, error);
@@ -53,69 +140,38 @@ router.post("/aadhaar/digilocker/start", aadhaarLimits.start, async (req: Reques
   }
 });
 
-// ─── Check ───────────────────────────────────────────────────────────────────
+// ─── Resume (free) ───────────────────────────────────────────────────────────
 
-// Each check is a billed Sandbox status call. Several tabs polling the same session must not
-// multiply that, so a session is checked against Sandbox at most this often.
-const CHECK_MIN_GAP_MS = 4 * 1000;
-// Session tokens expire after 30 minutes, so nothing about a session is useful for longer.
-const SESSION_TTL_MS = 30 * 60 * 1000;
-const lastCheckAt = new Map<string, number>();
+/**
+ * Called by the form before /start when it still holds a session token for this Aadhaar. Never calls
+ * Sandbox. Answers with the verification result if the session's Aadhaar is already known (matched
+ * against the pincode and date of birth sent now), { status: "open" } with the same DigiLocker link
+ * if the session is still waiting for the student, or { status: "new" } when /start is needed.
+ * Only the browser holding the signed session token can resume it.
+ */
+router.post("/aadhaar/digilocker/resume", aadhaarLimits.resume, (req: Request, res: Response) => {
+  const { aadhaarNumber, pincode, dob, digilockerSessionToken } = req.body ?? {};
+  if (!isValidAadhaar(aadhaarNumber)) return res.status(400).json({ error: "Please enter a valid 12-digit Aadhaar number." });
+  if (!isValidPincode(pincode)) return res.status(400).json({ error: "Please enter your 6-digit pincode first." });
+  if (!isValidDob(dob)) return res.status(400).json({ error: "Please enter your date of birth first." });
+  if (!isSandboxConfigured()) return notConfigured(res);
 
-type CheckOutcome = { httpStatus: number; body: Record<string, unknown> };
-// A verified session's answer, so re-checks don't fetch status and the Aadhaar document again.
-// Keyed by session, Aadhaar and pincode, and only read after the signed session token is validated.
-const verifiedSessions = new Map<string, { outcome: CheckOutcome; expiresAt: number }>();
-// A check already talking to Sandbox: concurrent requests for the same session share its result.
-const checksInFlight = new Map<string, Promise<CheckOutcome>>();
+  const session = readSessionToken(digilockerSessionToken, aadhaarNumber);
+  const state = session ? sessions.get(session.sessionId) : undefined;
+  if (!session || !state || state.aadhaarNumber !== aadhaarNumber) return res.json({ status: "new" });
 
-async function runCheck(sessionId: string, aadhaarNumber: string, pincode: string, dob: string): Promise<CheckOutcome> {
-  try {
-    const status = await getDigilockerSessionStatus(sessionId);
-    if (status === "created") return { httpStatus: 200, body: { status: "pending" } };
-    if (status !== "succeeded") {
-      return { httpStatus: 400, body: { error: "DigiLocker verification was cancelled or expired. Please click Verify again." } };
-    }
-
-    const details = await fetchDigilockerAadhaar(sessionId);
-    // DigiLocker returns a masked number (e.g. xxxxxxxx1234); its last 4 digits must match what was entered.
-    const lastFour = (details.maskedAadhaar || "").replace(/\D/g, "").slice(-4);
-    if (lastFour.length !== 4 || lastFour !== aadhaarNumber.slice(-4)) {
-      console.error(`[Aadhaar] DigiLocker Aadhaar ending ${lastFour || "n/a"} does not match entered number ending ${aadhaarNumber.slice(-4)}`);
-      return { httpStatus: 400, body: { error: "The Aadhaar in your DigiLocker account does not match the number you entered." } };
-    }
-
-    if (!details.pincode) {
-      return { httpStatus: 400, body: { error: "Your Aadhaar does not show a pincode, so it can't be matched. Please contact the TNJA office." } };
-    }
-    if (details.pincode !== pincode) {
-      // The student is looking at their own Aadhaar, so telling them its pincode helps them fix the form.
-      return {
-        httpStatus: 400,
-        body: { error: `The pincode on your Aadhaar (${details.pincode}) does not match the pincode you entered (${pincode}). Go back and enter the pincode on your Aadhaar.`, aadhaarPincode: details.pincode },
-      };
-    }
-
-    const aadhaarDob = normaliseAadhaarDob(details.dateOfBirth);
-    if (!aadhaarDob) {
-      return { httpStatus: 400, body: { error: "Your Aadhaar does not show a date of birth, so it can't be matched. Please contact the TNJA office." } };
-    }
-    if (!dobMatches(aadhaarDob, dob)) {
-      const shown = aadhaarDob.length === 4 ? `year of birth (${aadhaarDob})` : `date of birth (${aadhaarDob.slice(8, 10)}/${aadhaarDob.slice(5, 7)}/${aadhaarDob.slice(0, 4)})`;
-      // The student is looking at their own Aadhaar, so telling them its date helps them fix the form.
-      return { httpStatus: 400, body: { error: `The ${shown} on your Aadhaar does not match the date of birth you entered. Go back and enter the date of birth on your Aadhaar.` } };
-    }
-
-    return {
-      httpStatus: 200,
-      body: { status: "verified", aadhaarVerificationToken: createVerifiedToken(aadhaarNumber, pincode, dob), aadhaarDetails: { name: details.name } },
-    };
-  } catch (error) {
-    if (error instanceof SandboxError) return { httpStatus: error.status >= 500 ? 502 : 400, body: { error: error.message } };
-    console.error("Error checking DigiLocker verification:", error);
-    return { httpStatus: 500, body: { error: "Failed to verify Aadhaar." } };
+  if (state.final?.kind === "aadhaar") {
+    const outcome = answer(state.final, aadhaarNumber, pincode, dob);
+    return res.status(outcome.httpStatus).json(outcome.body);
   }
-}
+  const now = Date.now();
+  if (state.final || !state.authorizationUrl || now - state.startedAt > OPEN_SESSION_REUSE_MS || state.statusChecks >= MAX_STATUS_CHECKS_PER_SESSION) {
+    return res.json({ status: "new" });
+  }
+  res.json({ status: "open", authorizationUrl: state.authorizationUrl, digilockerSessionToken: createSessionToken(aadhaarNumber, pincode, dob, session.sessionId) });
+});
+
+// ─── Check ───────────────────────────────────────────────────────────────────
 
 /** Returns { status: "pending" } until the student consents in DigiLocker, then verifies the Aadhaar, pincode and date of birth. */
 router.post("/aadhaar/digilocker/check", aadhaarLimits.check, async (req: Request, res: Response) => {
@@ -127,36 +183,32 @@ router.post("/aadhaar/digilocker/check", aadhaarLimits.check, async (req: Reques
   if (!session) return res.status(400).json({ error: "Verification session expired. Please click Verify again." });
   const { sessionId, pincode, dob } = session;
 
-  const key = `${sessionId}:${aadhaarNumber}:${pincode}:${dob}`;
   const now = Date.now();
-  const verified = verifiedSessions.get(key);
-  if (verified && verified.expiresAt > now) return res.status(verified.outcome.httpStatus).json(verified.outcome.body);
+  // A session started before a restart carries on from the token alone (no free reuse for it).
+  const state = sessions.get(sessionId) ?? { aadhaarNumber, authorizationUrl: "", startedAt: now, statusChecks: 0, lastCheckAt: 0 };
+  sessions.set(sessionId, state);
 
-  const inFlight = checksInFlight.get(key);
-  if (inFlight) {
-    const outcome = await inFlight;
-    return res.status(outcome.httpStatus).json(outcome.body);
+  const reply = (outcome: CheckOutcome | null) => {
+    const final = outcome ?? answer(state.final!, aadhaarNumber, pincode, dob);
+    res.status(final.httpStatus).json(final.body);
+  };
+
+  if (state.final) return reply(null);
+  if (state.inFlight) return reply(await state.inFlight);
+  if (now - state.lastCheckAt < CHECK_MIN_GAP_MS) return res.json({ status: "pending" });
+  if (state.statusChecks >= MAX_STATUS_CHECKS_PER_SESSION) {
+    console.warn(`[Aadhaar] Session reached ${MAX_STATUS_CHECKS_PER_SESSION} status checks; refusing more.`);
+    state.final = { kind: "failed", outcome: failed(400, "Verification timed out. Please click Verify again.") };
+    return reply(null);
   }
 
-  const last = lastCheckAt.get(sessionId);
-  if (last && now - last < CHECK_MIN_GAP_MS) return res.json({ status: "pending" });
-  lastCheckAt.set(sessionId, now);
-  for (const [k, at] of lastCheckAt) if (now - at > SESSION_TTL_MS) lastCheckAt.delete(k);
-
-  const check = runCheck(sessionId, aadhaarNumber, pincode, dob);
-  checksInFlight.set(key, check);
-  let outcome: CheckOutcome;
+  state.lastCheckAt = now;
+  state.inFlight = askSandbox(sessionId, state);
   try {
-    outcome = await check;
+    reply(await state.inFlight);
   } finally {
-    checksInFlight.delete(key);
+    state.inFlight = undefined;
   }
-
-  if (outcome.httpStatus === 200 && outcome.body.status === "verified") {
-    verifiedSessions.set(key, { outcome, expiresAt: now + SESSION_TTL_MS });
-    for (const [k, entry] of verifiedSessions) if (entry.expiresAt <= now) verifiedSessions.delete(k);
-  }
-  res.status(outcome.httpStatus).json(outcome.body);
 });
 
 export default router;

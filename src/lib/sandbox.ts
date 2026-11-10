@@ -48,6 +48,29 @@ function friendlyMessage(raw: string, status: number): string {
   return raw;
 }
 
+// Hard daily cap on billed Sandbox HTTP calls from this process (authenticate, init, status and
+// document calls, retries included), whatever triggered them. The per-route limits keep normal use
+// far below it; this is the last line of defence against a bug or a bot running up the bill.
+// Counted per calendar day in India time. SANDBOX_DAILY_CALL_LIMIT=0 switches the cap off.
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const callsToday = { day: "", count: 0 };
+const BUDGET_MESSAGE = "Aadhaar verification is temporarily unavailable due to high demand. Please try again later or contact the TNJA office.";
+
+function takeCallBudget() {
+  const limit = Number(process.env.SANDBOX_DAILY_CALL_LIMIT ?? 2000);
+  const day = new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
+  if (callsToday.day !== day) {
+    callsToday.day = day;
+    callsToday.count = 0;
+  }
+  if (limit > 0 && callsToday.count >= limit) {
+    console.error(`[Sandbox] Daily call limit reached (${limit}). Refusing Sandbox calls until midnight IST.`);
+    // accountProblem: callers must not retry, the retry would be refused too.
+    throw new SandboxError(BUDGET_MESSAGE, 503, true);
+  }
+  callsToday.count++;
+}
+
 // Which backend made a call: several (the main site, this app, local dev) may share one API key.
 const INSTANCE = process.env.INSTANCE_NAME || `tournament@${os.hostname()}:${process.pid}`;
 
@@ -62,7 +85,7 @@ const newCall = (): CallContext => ({ id: crypto.randomBytes(4).toString("hex"),
 function logCall(call: CallContext, method: string, path: string, outcome: string, startedAt: number) {
   console.log(
     `[Sandbox] ${new Date().toISOString()} instance=${INSTANCE} call=${call.id} attempt=${call.attempt} ` +
-      `${method} ${path.split("?")[0]} -> ${outcome} (${Date.now() - startedAt}ms)`,
+      `${method} ${path.split("?")[0]} -> ${outcome} (${Date.now() - startedAt}ms) today=${callsToday.count}`,
   );
 }
 
@@ -70,6 +93,7 @@ async function request(path: string, init: { method: string; headers: Record<str
   const config = getConfig();
   if (!config) throw new SandboxError("Aadhaar verification is not configured.", 503);
   if (Date.now() < pausedUntil) throw new SandboxError(ACCOUNT_PROBLEM_MESSAGE, 503, true);
+  takeCallBudget();
 
   const startedAt = Date.now();
   let res: globalThis.Response;
