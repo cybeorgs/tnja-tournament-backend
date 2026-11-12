@@ -1,4 +1,4 @@
-// ─── Payments report: boys / girls and district-wise totals, plus the PDF download ──────────────
+// ─── Payments report: boys / girls, students / working professionals and district-wise totals, plus the PDF download ──────────────
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 import { getSettings } from "./helpers.js";
 
@@ -12,7 +12,7 @@ export interface ReportEntry {
   paymentMode: string | null;
   amountPaid: number;
   paidAt: Date | null;
-  student: { studentNo: string | null; fullName: string; district: string; club: string; phone: string };
+  student: { studentNo: string | null; fullName: string; district: string; club: string; phone: string; participantType: string };
   tournament: { title: string };
 }
 
@@ -20,6 +20,8 @@ export interface ReportGroup {
   entries: number;
   boys: number;
   girls: number;
+  students: number;
+  professionals: number;
   paidCount: number;
   collected: number;
   unpaidCount: number;
@@ -38,15 +40,19 @@ export interface PaymentReport {
 export const NO_DISTRICT = "Not specified";
 export const districtOf = (e: { student: { district: string } }) => e.student.district.trim() || NO_DISTRICT;
 export const genderLabel = (g: string) => (g === "FEMALE" ? "Girls" : "Boys");
+export const isProfessional = (e: { student: { participantType: string } }) => e.student.participantType === "PROFESSIONAL";
+export const typeLabel = (e: { student: { participantType: string } }) => (isProfessional(e) ? "Working professional" : "Student");
 export const STATUS_LABEL: Record<string, string> = { PAID: "Paid", PENDING: "Unpaid", WAIVED: "Free" };
 export const MODE_LABEL: Record<string, string> = { RAZORPAY: "Online", CASH: "Cash", UPI: "UPI", OTHER: "Other" };
 
-const emptyGroup = (): ReportGroup => ({ entries: 0, boys: 0, girls: 0, paidCount: 0, collected: 0, unpaidCount: 0, due: 0 });
+const emptyGroup = (): ReportGroup => ({ entries: 0, boys: 0, girls: 0, students: 0, professionals: 0, paidCount: 0, collected: 0, unpaidCount: 0, due: 0 });
 
 function add(g: ReportGroup, e: ReportEntry) {
   g.entries++;
   if (e.gender === "FEMALE") g.girls++;
   else g.boys++;
+  if (isProfessional(e)) g.professionals++;
+  else g.students++;
   if (e.paymentStatus === "PAID") {
     g.paidCount++;
     g.collected += e.amountPaid;
@@ -152,22 +158,20 @@ export async function renderPaymentReportPdf(entries: ReportEntry[], opts: PdfOp
   // ── Summary boxes ──
   y = H - 100;
   const t = report.totals;
-  const boxes: [string, string][] = [
-    ["Entries", String(t.entries)],
-    ["Boys", String(t.boys)],
-    ["Girls", String(t.girls)],
-    ["Paid entries", String(t.paidCount)],
-    ["Collected", money(t.collected)],
-    ["Unpaid entries", String(t.unpaidCount)],
-    ["Due", money(t.due)],
+  const boxRows: [string, string][][] = [
+    [["Entries", String(t.entries)], ["Boys", String(t.boys)], ["Girls", String(t.girls)], ["Students", String(t.students)], ["Working professionals", String(t.professionals)]],
+    [["Paid entries", String(t.paidCount)], ["Collected", money(t.collected)], ["Unpaid entries", String(t.unpaidCount)], ["Due", money(t.due)]],
   ];
   const gap = 8;
-  const bw = (right - left - gap * (boxes.length - 1)) / boxes.length;
-  boxes.forEach(([label, value], i) => {
-    const x = left + i * (bw + gap);
-    page.drawRectangle({ x, y: y - 44, width: bw, height: 48, borderColor: LINE, borderWidth: 1, color: rgb(1, 1, 1) });
-    page.drawText(label.toUpperCase(), { x: x + 8, y: y - 12, size: 7.5, font: bold, color: MUTED });
-    page.drawText(fit(value, bold, 14, bw - 16), { x: x + 8, y: y - 34, size: 14, font: bold, color: INK });
+  boxRows.forEach((boxes, row) => {
+    if (row > 0) y -= 58;
+    const bw = (right - left - gap * (boxes.length - 1)) / boxes.length;
+    boxes.forEach(([label, value], i) => {
+      const x = left + i * (bw + gap);
+      page.drawRectangle({ x, y: y - 44, width: bw, height: 48, borderColor: LINE, borderWidth: 1, color: rgb(1, 1, 1) });
+      page.drawText(label.toUpperCase(), { x: x + 8, y: y - 12, size: 7.5, font: bold, color: MUTED });
+      page.drawText(fit(value, bold, 14, bw - 16), { x: x + 8, y: y - 34, size: 14, font: bold, color: INK });
+    });
   });
   y -= 70;
 
@@ -213,17 +217,19 @@ export async function renderPaymentReportPdf(entries: ReportEntry[], opts: PdfOp
   section("District-wise summary");
   const dCols: Col[] = [
     { header: "#", width: 30, align: "right" },
-    { header: "District", width: 210 },
-    { header: "Entries", width: 70, align: "right" },
-    { header: "Boys", width: 65, align: "right" },
-    { header: "Girls", width: 65, align: "right" },
-    { header: "Paid", width: 65, align: "right" },
-    { header: "Collected", width: 90, align: "right" },
-    { header: "Unpaid", width: 65, align: "right" },
-    { header: "Due", width: right - left - 660, align: "right" },
+    { header: "District", width: 150 },
+    { header: "Entries", width: 55, align: "right" },
+    { header: "Boys", width: 50, align: "right" },
+    { header: "Girls", width: 50, align: "right" },
+    { header: "Students", width: 60, align: "right" },
+    { header: "Professionals", width: 80, align: "right" },
+    { header: "Paid", width: 50, align: "right" },
+    { header: "Collected", width: 85, align: "right" },
+    { header: "Unpaid", width: 55, align: "right" },
+    { header: "Due", width: right - left - 665, align: "right" },
   ];
   drawHeader(dCols);
-  const groupCells = (g: ReportGroup) => [String(g.entries), String(g.boys), String(g.girls), String(g.paidCount), money(g.collected), String(g.unpaidCount), money(g.due)];
+  const groupCells = (g: ReportGroup) => [String(g.entries), String(g.boys), String(g.girls), String(g.students), String(g.professionals), String(g.paidCount), money(g.collected), String(g.unpaidCount), money(g.due)];
   report.districts.forEach((d, i) => {
     ensure(dCols);
     drawRow(dCols, [String(i + 1), d.district, ...groupCells(d)], { stripe: i % 2 === 1 });
@@ -237,11 +243,12 @@ export async function renderPaymentReportPdf(entries: ReportEntry[], opts: PdfOp
     { header: "#", width: 30, align: "right" },
     { header: "Player", width: 140 },
     { header: "Student ID", width: 85 },
-    { header: "Club", width: 105 },
-    { header: "Category", width: 165 },
+    { header: "Club", width: 85 },
+    { header: "Type", width: 55 },
+    { header: "Category", width: 140 },
     { header: "Status", width: 45 },
     { header: "Amount", width: 60, align: "right" },
-    { header: "Paid on", width: right - left - 630 },
+    { header: "Paid on", width: right - left - 640 },
   ];
   const byD = new Map<string, ReportEntry[]>();
   for (const e of entries) {
@@ -253,14 +260,15 @@ export async function renderPaymentReportPdf(entries: ReportEntry[], opts: PdfOp
   for (const district of [...byD.keys()].sort(byDistrict)) {
     const list = byD.get(district)!.sort((a, b) => a.student.fullName.localeCompare(b.student.fullName));
     const boys = list.filter((e) => e.gender !== "FEMALE").length;
-    section(`${district}  (${list.length} entries: ${boys} boys, ${list.length - boys} girls)`);
+    const pros = list.filter(isProfessional).length;
+    section(`${district}  (${list.length} entries: ${boys} boys, ${list.length - boys} girls  |  ${list.length - pros} students, ${pros} working professionals)`);
     drawHeader(eCols);
     list.forEach((e, i) => {
       ensure(eCols);
       const category = `${e.ageGroup} - ${genderLabel(e.gender)} - ${e.weightCategory}${multiTournament ? ` (${e.tournament.title})` : ""}`;
       const amount = e.paymentStatus === "PAID" ? e.amountPaid : e.fee;
       const paid = e.paidAt ? `${dateTime(e.paidAt)}${e.paymentMode ? ` - ${MODE_LABEL[e.paymentMode] ?? e.paymentMode}` : ""}` : "";
-      drawRow(eCols, [String(i + 1), e.student.fullName, e.student.studentNo ?? "", e.student.club, category, STATUS_LABEL[e.paymentStatus] ?? e.paymentStatus, money(amount), paid], { stripe: i % 2 === 1 });
+      drawRow(eCols, [String(i + 1), e.student.fullName, e.student.studentNo ?? "", e.student.club, isProfessional(e) ? "Professional" : "Student", category, STATUS_LABEL[e.paymentStatus] ?? e.paymentStatus, money(amount), paid], { stripe: i % 2 === 1 });
     });
     y -= 14;
   }

@@ -1,14 +1,14 @@
 // Admin view of entry-fee payments across tournaments.
 // Entries are charged the tournament's entry fee when made (see lib/fees.ts): PENDING until paid,
 // PAID once paid, WAIVED for free tournaments. The online payment step is added later.
-// Also: boys / girls and district-wise report (JSON), and Excel / PDF downloads of the filtered list.
+// Also: boys / girls, students / working professionals and district-wise report (JSON), and Excel / PDF downloads of the filtered list.
 import { Router } from "express";
 import { z } from "zod";
 import type { Prisma } from "@prisma/client";
 import prisma from "../db.js";
 import { DATE, DATE_TIME, sendSheets, sheet } from "../lib/excel.js";
 import {
-  buildReport, districtOf, genderLabel, MODE_LABEL, paymentReportPdf, STATUS_LABEL,
+  buildReport, districtOf, genderLabel, typeLabel, MODE_LABEL, paymentReportPdf, STATUS_LABEL,
   type DistrictRow,
 } from "../lib/paymentReport.js";
 
@@ -61,7 +61,7 @@ router.get("/", async (req, res) => {
       select: {
         id: true, ageGroup: true, gender: true, weightCategory: true, fee: true, paymentStatus: true, paymentMode: true,
         amountPaid: true, razorpayPaymentId: true, paidAt: true, createdAt: true,
-        student: { select: { id: true, studentNo: true, fullName: true, phone: true, email: true, club: true, district: true } },
+        student: { select: { id: true, studentNo: true, fullName: true, phone: true, email: true, club: true, district: true, participantType: true } },
         tournament: { select: { id: true, title: true, startDate: true } },
       },
     }),
@@ -89,7 +89,7 @@ function reportEntries(filters: Filters) {
     select: {
       ageGroup: true, gender: true, weightCategory: true, fee: true, paymentStatus: true, paymentMode: true,
       amountPaid: true, razorpayPaymentId: true, paidAt: true, createdAt: true, isLate: true,
-      student: { select: { studentNo: true, fullName: true, phone: true, email: true, club: true, district: true } },
+      student: { select: { studentNo: true, fullName: true, phone: true, email: true, club: true, district: true, participantType: true } },
       tournament: { select: { title: true, startDate: true } },
     },
   });
@@ -108,7 +108,7 @@ async function describe(filters: Filters) {
   return { scope, filterNote, base };
 }
 
-/** Boys / girls and district-wise totals for the current filters. */
+/** Boys / girls, students / working professionals and district-wise totals for the current filters. */
 router.get("/report", async (req, res) => {
   const filters = filterQuery.parse(req.query);
   res.json(buildReport(await reportEntries(filters)));
@@ -131,6 +131,8 @@ router.get("/export.xlsx", async (req, res) => {
         { header: "Entries", value: (r) => r.entries },
         { header: "Boys", value: (r) => r.boys },
         { header: "Girls", value: (r) => r.girls },
+        { header: "Students", value: (r) => r.students },
+        { header: "Working professionals", width: 22, value: (r) => r.professionals },
         { header: "Paid entries", width: 14, value: (r) => r.paidCount },
         { header: "Collected (₹)", width: 15, value: (r) => r.collected, format: "#,##0" },
         { header: "Unpaid entries", width: 15, value: (r) => r.unpaidCount },
@@ -144,6 +146,7 @@ router.get("/export.xlsx", async (req, res) => {
         { header: "Student ID", width: 16, value: (e) => e.student.studentNo },
         { header: "Name", width: 26, value: (e) => e.student.fullName },
         { header: "Boys / Girls", width: 12, value: (e) => genderLabel(e.gender) },
+        { header: "Student / Professional", width: 22, value: (e) => typeLabel(e) },
         { header: "District", width: 18, value: (e) => districtOf(e) },
         { header: "Club", width: 24, value: (e) => e.student.club },
         { header: "Phone", width: 14, value: (e) => e.student.phone },
