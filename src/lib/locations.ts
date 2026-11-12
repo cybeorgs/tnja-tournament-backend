@@ -26,6 +26,10 @@ const NAME_ALIASES = new Map(
     Kanyakumari: "Kanniyakumari",
     Sivagangai: "Sivaganga",
     Ooty: "Udhagamandalam",
+    // Tenkasi district; India Post uses both "Sengottai" and "Shenkottai"
+    Shenkottai: "Sengottai",
+    Shencottai: "Sengottai",
+    Senkottai: "Sengottai",
   }).map(([from, to]) => [baseKey(from), baseKey(to)]),
 );
 
@@ -33,6 +37,11 @@ const nameKey = (s: string) => {
   const k = baseKey(s);
   return NAME_ALIASES.get(k) ?? k;
 };
+
+/** `district`'s taluk with this name, allowing other spellings (e.g. "Shenkottai" → "Sengottai"). */
+export function findTaluk(district: string, taluk: string): string | undefined {
+  return TN_LOCATIONS.find((d) => nameKey(d.district) === nameKey(district))?.taluks.find((t) => nameKey(t) === nameKey(taluk));
+}
 
 /** True when `taluk` is one of `district`'s taluks. */
 export function isKnownLocation(district: string, taluk: string) {

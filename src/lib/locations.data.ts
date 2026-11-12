@@ -24,7 +24,7 @@ export const TN_LOCATIONS: { district: string; taluks: string[] }[] = [
   { district: "Ranipet", taluks: ["Arakkonam", "Arcot", "Kalavai", "Nemili", "Sholinghur", "Walajah"] },
   { district: "Salem", taluks: ["Attur", "Edappadi", "Gangavalli", "Mettur", "Omalur", "Salem", "Sankagiri", "Yercaud"] },
   { district: "Sivaganga", taluks: ["Devakottai", "Ilayangudi", "Kalaiyarkovil", "Karaikudi", "Manamadurai", "Singampunari", "Sivaganga", "Thirupuvanam", "Tiruppathur"] },
-  { district: "Tenkasi", taluks: ["Alangulam", "Kadayanallur", "Sankarankovil", "Shencottai", "Sivagiri", "Tenkasi", "Thiruvengadam", "Veerakeralampudur"] },
+  { district: "Tenkasi", taluks: ["Alangulam", "Kadayanallur", "Sankarankovil", "Sengottai", "Sivagiri", "Tenkasi", "Thiruvengadam", "Veerakeralampudur"] },
   { district: "Thanjavur", taluks: ["Budalur", "Kumbakonam", "Orathanadu", "Papanasam", "Pattukkottai", "Peravurani", "Thanjavur", "Thiruvaiyaru"] },
   { district: "Theni", taluks: ["Andipatti", "Bodinayakanur", "Periyakulam", "Theni", "Uthamapalayam"] },
   { district: "Thoothukudi", taluks: ["Ettayapuram", "Kayathar", "Kovilpatti", "Ottapidaram", "Sathankulam", "Srivaikuntam", "Thoothukudi", "Tiruchendur", "Vilathikulam"] },

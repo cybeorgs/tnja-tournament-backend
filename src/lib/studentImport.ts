@@ -6,7 +6,7 @@
 import { HttpError } from "../middleware/errors.js";
 import prisma from "../db.js";
 import { BLOOD_GROUPS, confirmResidency, studentSchema, type StudentData } from "./students.js";
-import { TN_LOCATIONS } from "./locations.js";
+import { TN_LOCATIONS, findTaluk } from "./locations.js";
 import { digits, key, readImportSheet, str, templateWorkbook as buildTemplate, type Cell, type ImportColumn } from "./importSheet.js";
 
 export const IMPORT_MAX_ROWS = 2000;
@@ -90,7 +90,7 @@ const yes = (v: Cell | undefined) => (typeof v === "boolean" ? v : ["yes", "y", 
 function canonicalLocation(district: string, taluk: string) {
   const d = TN_LOCATIONS.find((x) => key(x.district) === key(district));
   if (!d) return { district, taluk };
-  return { district: d.district, taluk: d.taluks.find((t) => key(t) === key(taluk)) ?? taluk };
+  return { district: d.district, taluk: d.taluks.find((t) => key(t) === key(taluk)) ?? findTaluk(d.district, taluk) ?? taluk };
 }
 
 const LABEL = new Map(IMPORT_COLUMNS.map((c) => [c.field as string, c.header]));

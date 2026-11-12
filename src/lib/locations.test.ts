@@ -10,6 +10,9 @@ const DIRECTORY: Record<string, ReturnType<typeof office>[]> = {
   "600001": [office("Chennai", "Chennai", "Chennai", "Tamil Nadu"), office("Mannady (Chennai)", "Chennai", "Tondiarpet Fort St George", "Tamil Nadu")],
   "110001": [office("Connaught Place", "Central Delhi", "New Delhi", "Delhi")],
   "641001": [office("Coimbatore", "Coimbatore", "Coimbatore South", "Tamil Nadu")],
+  // Sengottai is in Tenkasi district, but India Post still lists it under Tirunelveli (pre-2019 boundaries)
+  "627813": [office("Karkudi", "Tirunelveli", "Sengottai", "Tamil Nadu"), office("Puliyara", "Tirunelveli", "Sengottai", "Tamil Nadu")],
+  "627809": [office("Melur", "Tirunelveli", "Shenkottai", "Tamil Nadu"), office("Sengottai", "Tirunelveli", "Sengottai", "Tamil Nadu"), office("Vallam", "Tirunelveli", "Tenkasi", "Tamil Nadu")],
   // 600112 (Choolai, Chennai) has no record in api.postalpincode.in: it answers "No records found".
 };
 function stubIndiaPost() {
@@ -36,6 +39,19 @@ describe("isValidPincode", () => {
 });
 
 describe("lookupPincode", () => {
+  it("places 627813 in Tenkasi district, Sengottai taluk", async () => {
+    stubIndiaPost();
+    const r = await lookupPincode("627813");
+    assert.equal(r.district, "Tenkasi");
+    assert.deepEqual(r.taluks, ["Sengottai"]);
+  });
+  it("matches the Shenkottai spelling to Sengottai", async () => {
+    stubIndiaPost();
+    const r = await lookupPincode("627809");
+    assert.equal(r.district, "Tenkasi");
+    assert.deepEqual(r.taluks, ["Sengottai", "Tenkasi"]);
+  });
+
   it("accepts 600112 even though the India Post directory has no record of it", async () => {
     stubIndiaPost();
     const m = await lookupPincode("600112");
