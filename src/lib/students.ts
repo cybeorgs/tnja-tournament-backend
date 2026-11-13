@@ -3,7 +3,7 @@ import { z } from "zod";
 import prisma from "../db.js";
 import { HttpError } from "../middleware/errors.js";
 import { getSettings } from "./helpers.js";
-import { PINCODE_FORMAT_MESSAGE, PINCODE_PATTERN, isKnownLocation, lookupPincode } from "./locations.js";
+import { PINCODE_FORMAT_MESSAGE, PINCODE_PATTERN, TN_LOCATIONS, isKnownLocation, lookupPincode } from "./locations.js";
 import { recordStudentAudit, type Actor } from "./audit.js";
 
 type Tx = Prisma.TransactionClient;
@@ -22,9 +22,10 @@ const threeYearsAgo = () => {
   return d;
 };
 
-export const BLOOD_GROUPS = ["O+ve", "O-ve", "A+ve", "A-ve", "B+ve", "B-ve", "AB+ve", "AB-ve"] as const;
+export const BLOOD_GROUPS = ["O+ve", "O-ve", "A+ve", "A-ve", "A1+ve", "B+ve", "B-ve", "AB+ve", "AB-ve"] as const;
 export const PARTICIPANT_TYPES = ["STUDENT", "PROFESSIONAL"] as const;
 export const EMPLOYMENT_TYPES = ["PRIVATE", "GOVERNMENT", "SELF_EMPLOYED", "OTHER"] as const;
+export const REPRESENTING = ["DISTRICT", "UNIT"] as const;
 
 export const studentSchema = z
   .object({
@@ -34,6 +35,12 @@ export const studentSchema = z
     outsideTamilNadu: z.boolean().default(false),
     district: text("District", 80),
     taluk: optional(80),
+
+    // Representing: a district or a unit (for the overall championship). Optional here so imports and
+    // older records still save; the registration forms require it. Checked by confirmResidency.
+    representing: z.union([z.literal(""), z.enum(REPRESENTING, { error: "Choose district or unit" })]).default(""),
+    representingDistrict: optional(80),
+    representingUnit: optional(120),
 
     // Personal information
     fullName: name("Full name"),
@@ -112,11 +119,30 @@ function clearOtherDetails<T>(data: T): T {
 }
 
 /**
+ * Representing a district (one from the Tamil Nadu list) or a unit (one from Admin → Units, stored by
+ * its exact name). Only the chosen one is kept.
+ */
+export async function confirmRepresenting<T extends { representing: string; representingDistrict: string; representingUnit: string }>(data: T): Promise<T> {
+  if (data.representing === "DISTRICT") {
+    const district = TN_LOCATIONS.find((d) => d.district.toLowerCase() === data.representingDistrict.trim().toLowerCase())?.district;
+    if (!district) throw new HttpError(400, "representingDistrict: Choose the district you represent");
+    return { ...data, representingDistrict: district, representingUnit: "" };
+  }
+  if (data.representing === "UNIT") {
+    const unit = data.representingUnit.trim() && (await prisma.unit.findFirst({ where: { name: { equals: data.representingUnit.trim(), mode: "insensitive" } }, select: { name: true } }));
+    if (!unit) throw new HttpError(400, "representingUnit: Choose the unit you represent");
+    return { ...data, representingDistrict: "", representingUnit: unit.name };
+  }
+  return { ...data, representing: "", representingDistrict: "", representingUnit: "" };
+}
+
+/**
  * Decide from the pincode itself whether the student lives in Tamil Nadu, rather than trusting
  * the form (if the lookup service is down, the form's answer is kept). Tamil Nadu residents must
  * pick a district and taluk from the list.
  */
-export async function confirmResidency<T extends { residingPincode: string; outsideTamilNadu: boolean; isBPL: boolean; district: string; taluk: string; parentPhone: string; emergencyPhone: string }>(data: T): Promise<T> {
+export async function confirmResidency<T extends { residingPincode: string; outsideTamilNadu: boolean; isBPL: boolean; district: string; taluk: string; parentPhone: string; emergencyPhone: string; representing: string; representingDistrict: string; representingUnit: string }>(data: T): Promise<T> {
+  data = await confirmRepresenting(data);
   // One number: the parent's mobile is the emergency contact (whichever was given fills both).
   const contact = data.parentPhone || data.emergencyPhone;
   data = clearOtherDetails({ ...data, parentPhone: contact, emergencyPhone: contact });

@@ -18,6 +18,7 @@ const LABELS: Record<string, string> = {
   bloodGroup: "Blood group", aadhaarNumber: "Aadhaar", phone: "Mobile", alternatePhone: "Alternate mobile",
   parentPhone: "Parent / emergency contact", emergencyPhone: "Emergency contact", email: "Email", nationality: "Nationality",
   residingPincode: "Residing pincode", outsideTamilNadu: "Outside Tamil Nadu", district: "District", taluk: "Taluk",
+  representing: "Representing", representingDistrict: "Representing district", representingUnit: "Representing unit",
   address: "Address", city: "City", state: "State", pincode: "Pincode", annualIncome: "Annual income", isBPL: "BPL family",
   institutionType: "Institution type", institutionName: "Institution", grade: "Standard / year", degreeDepartment: "Department",
   participantType: "Type", employmentType: "Employment type", organisationName: "Organisation", occupation: "Designation",

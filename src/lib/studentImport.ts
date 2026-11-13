@@ -28,6 +28,7 @@ export const IMPORT_COLUMNS: ImportColumn<Field>[] = [
   { field: "residingPincode", header: "Residing Pincode", required: false, aliases: ["residingpin"], note: "Where they live / study; defaults to Pincode", example: "600002" },
   { field: "district", header: "District", required: true, aliases: ["districtname"], note: "Tamil Nadu: as in the district list", example: "Chennai" },
   { field: "taluk", header: "Taluk", required: false, aliases: ["talukname"], note: "Required for Tamil Nadu residents", example: "Egmore" },
+  { field: "representing", header: "Representing", required: false, aliases: ["represents", "representingdistrict", "representingunit", "unit", "team"], note: "A district or a unit name (as on Admin → Units); blank = their district", example: "Chennai" },
   { field: "address", header: "Address", required: true, aliases: ["permanentaddress", "doorno"], note: "", example: "12, Anna Salai" },
   { field: "city", header: "City", required: true, aliases: ["town", "village"], note: "", example: "Chennai" },
   { field: "state", header: "State", required: true, aliases: [], note: "", example: "Tamil Nadu" },
@@ -80,7 +81,7 @@ function parseGender(v: Cell | undefined) {
 
 function parseBloodGroup(v: Cell | undefined) {
   const s = str(v).toUpperCase().replace(/\s+/g, "").replace(/POSITIVE|POS|\+VE/g, "+").replace(/NEGATIVE|NEG|-VE/g, "-");
-  const m = /^(AB|A|B|O)([+-])$/.exec(s);
+  const m = /^(AB|A1|A|B|O)([+-])$/.exec(s);
   return m ? `${m[1]}${m[2]}ve` : str(v);
 }
 
@@ -99,6 +100,9 @@ function toInput(values: Partial<Record<Field, Cell>>) {
   const v = values;
   const pincode = digits(v.pincode);
   const location = canonicalLocation(str(v.district), str(v.taluk));
+  // Representing: a district or a unit name; blank = the district they live in (when it's a Tamil Nadu one).
+  const rep = str(v.representing);
+  const repDistrict = TN_LOCATIONS.find((d) => key(d.district) === key(rep || location.district))?.district;
   const institution = key(str(v.institutionType));
   const type = key(str(v.participantType));
   const employment = key(str(v.employmentType));
@@ -121,6 +125,9 @@ function toInput(values: Partial<Record<Field, Cell>>) {
     outsideTamilNadu: false, // decided from the pincode by confirmResidency
     district: location.district,
     taluk: location.taluk,
+    representing: rep && !repDistrict ? "UNIT" : repDistrict ? "DISTRICT" : "",
+    representingDistrict: repDistrict ?? "",
+    representingUnit: rep && !repDistrict ? rep : "",
     address: str(v.address),
     city: str(v.city),
     state: str(v.state),
@@ -175,7 +182,7 @@ export async function checkRows(rows: { row: number; values: Partial<Record<Fiel
       try {
         data = await confirmResidency(parsed.data);
       } catch (err) {
-        errors.push(err instanceof HttpError ? err.message.replace(/^taluk: /, "Taluk: ") : "Couldn't check the residing pincode");
+        errors.push(err instanceof HttpError ? err.message.replace(/^taluk: /, "Taluk: ").replace(/^representingw*: .*/, `Representing: "${str(values.representing)}" isn't a Tamil Nadu district or a unit on Admin → Units`) : "Couldn't check the residing pincode");
       }
     }
     checked.push({ row, fullName: input.fullName, email: input.email.toLowerCase(), district: input.district, errors, data: errors.length ? null : data });

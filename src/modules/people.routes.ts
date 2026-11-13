@@ -125,6 +125,8 @@ studentsRouter.get("/export", async (req, res) => {
     { header: "Residing pincode", value: (s) => s.residingPincode },
     { header: "District", width: 16, value: (s) => s.district },
     { header: "Taluk", width: 16, value: (s) => s.taluk },
+    { header: "Representing", width: 12, value: (s) => (s.representing === "UNIT" ? "Unit" : s.representing === "DISTRICT" ? "District" : "") },
+    { header: "Represents", width: 24, value: (s) => (s.representing === "UNIT" ? s.representingUnit : s.representingDistrict) },
     { header: "Outside Tamil Nadu", value: (s) => s.outsideTamilNadu },
     { header: "Address", width: 36, value: (s) => s.address },
     { header: "City", width: 16, value: (s) => s.city },

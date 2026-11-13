@@ -20,6 +20,9 @@ const date = (d: Date, withTime = false) =>
 const GENDER: Record<string, string> = { MALE: "Male", FEMALE: "Female", OTHER: "Other" };
 const INSTITUTION: Record<string, string> = { SCHOOL: "School", COLLEGE: "College", DIPLOMA: "Diploma" };
 const EMPLOYMENT: Record<string, string> = { PRIVATE: "Private", GOVERNMENT: "Government", SELF_EMPLOYED: "Self-employed", OTHER: "Other" };
+/** "Chennai (district)" or "Police (unit)"; "-" when not given. */
+const representingLabel = (s: Pick<Student, "representing" | "representingDistrict" | "representingUnit">) =>
+  s.representing === "UNIT" ? `${s.representingUnit} (unit)` : s.representing === "DISTRICT" ? `${s.representingDistrict} (district)` : "-";
 
 /** The text, shortened with "..." if it doesn't fit in `maxWidth`. */
 function fit(text: string, font: PDFFont, size: number, maxWidth: number) {
@@ -96,6 +99,7 @@ export async function registrationPdf(student: Student): Promise<Attachment> {
     ["Address", [
       ["Address", student.address], ["City", student.city], ["District", student.district], ["Taluk", student.taluk || "-"],
       ["State", student.state], ["Pincode", student.pincode], ["Residing pincode", student.residingPincode],
+      ["Representing", representingLabel(student)],
     ]],
     student.participantType === "PROFESSIONAL"
       ? ["Occupation & club", [

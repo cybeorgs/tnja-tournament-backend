@@ -80,6 +80,7 @@ router.post("/students/register", registerLimiter, async (req, res) => {
   assertAadhaarVerified(aadhaarVerificationToken, form.aadhaarNumber, form.residingPincode, form.dob);
   // Coach, manager, district president and secretary are set by the admin only: whatever a player sends is ignored.
   const data = await confirmResidency({ ...form, coachName: "", managerName: "", districtPresident: "", districtSecretary: "" });
+  if (!data.representing) throw new HttpError(400, "representing: Choose whether you represent a district or a unit");
 
   const documents: StudentUpload[] = [{ kind: "PHOTO", label: "Passport photo", ...decodeUpload(photo, "The photograph", 1024 * 1024, { imageOnly: true }) }];
   if (data.outsideTamilNadu) {

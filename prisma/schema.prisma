@@ -104,6 +104,13 @@ model Student {
   phone            String   @default("")
   // ── Registration details (see studentSchema in src/lib/students.ts) ──
   taluk            String   @default("")
+  // ── Representing (who they play for; counted for the overall championship) ──
+  /// DISTRICT | UNIT ("" on older records and imports that didn't say)
+  representing         String @default("")
+  /// A Tamil Nadu district, when representing a district (may differ from where they live)
+  representingDistrict String @default("")
+  /// A unit's name from the Unit list, when representing a unit (renaming a unit updates it here)
+  representingUnit     String @default("")
   residingPincode  String   @default("")
   bloodGroup       String   @default("")
   /// 12 digits; unique so one person can't hold two student IDs
@@ -158,6 +165,17 @@ model Student {
   @@index([email])
   @@index([status])
   @@index([participantType])
+  @@index([representing, representingDistrict])
+  @@index([representingUnit])
+}
+
+/// Units a player can represent instead of a district (e.g. a department or institution team).
+/// Managed on Admin → Units.
+model Unit {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 /// Files uploaded with a registration: the passport-size photo, BPL proof, or proof of nativity for applicants outside Tamil Nadu.
