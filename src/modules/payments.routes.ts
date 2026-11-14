@@ -231,8 +231,8 @@ const unpaidNoticeBody = z.object({
 });
 
 /**
- * Email unpaid players: "pay by <date>, or your registration (ID and details) will be deleted".
- * One email per player, listing their unpaid events in the tournament. Sent one after another within the
+ * Email unpaid players a reminder to pay by <date>, after which their pending registration is removed.
+ * One email per player with an unpaid entry in the tournament. Sent one after another within the
  * ADMIN daily email limit; the same player, tournament and date is never emailed twice (a double click
  * or a second run reports them as already sent), but a new date can be sent.
  */
@@ -258,18 +258,14 @@ router.post("/unpaid-notice", async (req, res) => {
   const actor = req.admin?.username || "admin";
   const counts = { sent: 0, alreadySent: 0, notSent: 0, noEmail: 0 };
   const notSent: string[] = [];
-  for (const { student, entries } of byStudent.values()) {
+  for (const { student } of byStudent.values()) {
     if (!student.email) { counts.noEmail++; continue; }
     const delivery = await sendUnpaidDeletionNotice(
       student.email,
-      {
-        fullName: student.fullName,
-        tournament: tournament.title,
-        events: entries.map((e) => ({ name: `${e.ageGroup} · ${genderLabel(e.gender)} ${e.weightCategory}`, fee: e.fee })),
-        amountDue: entries.reduce((sum, e) => sum + e.fee, 0),
-        payBy: new Date(`${payBy}T12:00:00+05:30`),
-      },
-      { trigger: "ADMIN", actor, studentId: student.id, tournamentId, idempotencyKey: `unpaid-notice:${tournamentId}:${student.id}:${payBy}` },
+      { fullName: student.fullName, tournament: tournament.title, payBy },
+      { trigger: "ADMIN", actor, studentId: student.id, tournamentId, idempotencyKey: `unpaid-notice:v2:${tournamentId}:${student.id}:${payBy}` },
+      // (v2: the reminder wording; a player emailed the earlier wording for a date can get this one once.
+      // The "last notice" list reads the date from the key's last part, so both versions show.)
     );
     if (["SENT", "LOGGED", "UNCERTAIN"].includes(delivery.status)) counts.sent++;
     else if (delivery.status === "DUPLICATE") counts.alreadySent++;
