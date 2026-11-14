@@ -18,7 +18,7 @@ import { suppress, suppressionOf } from "./emailSuppression.js";
 import { budgetDay, releaseEmail, reserveEmail, type EmailCategory } from "./emailBudget.js";
 import { isProductionDeployment, messageIdDomain, routeFor, sendWithRetry, smtpSendOnce, type Attachment } from "./emailTransport.js";
 
-export type EmailKind = "OTP" | "REGISTRATION_INCOMPLETE" | "REGISTRATION_SUCCESS" | "APPLICATION_RECEIVED" | "REGISTRATION_APPROVED" | "PASSWORD_RESET" | "ENTRY_PASS";
+export type EmailKind = "OTP" | "REGISTRATION_INCOMPLETE" | "REGISTRATION_SUCCESS" | "APPLICATION_RECEIVED" | "REGISTRATION_APPROVED" | "PASSWORD_RESET" | "ENTRY_PASS" | "UNPAID_NOTICE";
 export type EmailTrigger = "SELF" | "ADMIN" | "IMPORT" | "PAYMENT" | "SYSTEM";
 
 export const CATEGORY_OF: Record<EmailKind, EmailCategory> = {
@@ -29,6 +29,9 @@ export const CATEGORY_OF: Record<EmailKind, EmailCategory> = {
   REGISTRATION_APPROVED: "ADMIN",
   PASSWORD_RESET: "PASSWORD_RESET",
   ENTRY_PASS: "ENTRY_PASS",
+  // Sent in bulk by an admin; not held over the daily limit (a late deadline notice would be wrong), so
+  // anything over the limit is reported back as not sent and can be sent again another day.
+  UNPAID_NOTICE: "ADMIN",
 };
 
 /** Who/what caused an email, and what it's about (for the audit log and the duplicate guard). */

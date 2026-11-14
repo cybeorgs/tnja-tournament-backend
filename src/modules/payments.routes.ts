@@ -6,6 +6,8 @@ import { Router } from "express";
 import { z } from "zod";
 import type { Prisma } from "@prisma/client";
 import prisma from "../db.js";
+import { HttpError } from "../middleware/errors.js";
+import { sendUnpaidDeletionNotice } from "../lib/mailer.js";
 import { DATE, DATE_TIME, sendSheets, sheet } from "../lib/excel.js";
 import {
   buildReport, districtOf, genderLabel, typeLabel, MODE_LABEL, paymentReportPdf, STATUS_LABEL,
@@ -179,6 +181,105 @@ router.get("/export.pdf", async (req, res) => {
   res.setHeader("Content-Disposition", `${download ? "attachment" : "inline"}; filename="${safe}"`);
   res.setHeader("Cache-Control", "no-store");
   res.end(Buffer.from(bytes));
+});
+
+// ─── Unpaid notice ───────────────────────────────────────────────────────────
+
+/**
+ * Players with an unpaid entry in a tournament, one row per player (their unpaid events and total),
+ * with when they were last sent an unpaid notice for this tournament and the pay-by date it gave.
+ */
+router.get("/unpaid-players", async (req, res) => {
+  const { tournamentId } = z.object({ tournamentId: z.string().uuid() }).parse(req.query);
+  const unpaid = await prisma.registration.findMany({
+    where: { tournamentId, paymentStatus: "PENDING", fee: { gt: 0 } },
+    orderBy: { createdAt: "asc" },
+    select: {
+      id: true, ageGroup: true, gender: true, weightCategory: true, fee: true, createdAt: true,
+      student: { select: { id: true, studentNo: true, fullName: true, phone: true, email: true, district: true, participantType: true } },
+    },
+  });
+  const players = new Map<string, { student: (typeof unpaid)[number]["student"]; events: { id: string; name: string; fee: number }[]; due: number; enteredAt: Date }>();
+  for (const r of unpaid) {
+    const p = players.get(r.student.id) ?? { student: r.student, events: [], due: 0, enteredAt: r.createdAt };
+    p.events.push({ id: r.id, name: `${r.ageGroup} · ${genderLabel(r.gender)} ${r.weightCategory}`, fee: r.fee });
+    p.due += r.fee;
+    players.set(r.student.id, p);
+  }
+  const notices = players.size
+    ? await prisma.emailMessage.findMany({
+        where: { kind: "UNPAID_NOTICE", tournamentId, studentId: { in: [...players.keys()] }, status: { in: ["SENT", "LOGGED", "UNCERTAIN"] } },
+        orderBy: { createdAt: "desc" },
+        select: { studentId: true, createdAt: true, idempotencyKey: true },
+      })
+    : [];
+  const lastNotice = new Map<string, { sentAt: Date; payBy: string }>();
+  for (const n of notices) {
+    if (n.studentId && !lastNotice.has(n.studentId)) lastNotice.set(n.studentId, { sentAt: n.createdAt, payBy: n.idempotencyKey?.split(":").pop() ?? "" });
+  }
+  res.json({
+    items: [...players.values()].map((p) => ({ ...p, lastNotice: lastNotice.get(p.student.id) ?? null })),
+  });
+});
+
+const unpaidNoticeBody = z.object({
+  tournamentId: z.string().uuid(),
+  /** Only these players; left out = every player with an unpaid entry in the tournament */
+  studentIds: z.array(z.string().uuid()).min(1).max(1000).optional(),
+  /** Deadline shown in the email (YYYY-MM-DD, Indian time), today or later */
+  payBy: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Choose the date to pay by."),
+});
+
+/**
+ * Email unpaid players: "pay by <date>, or your registration (ID and details) will be deleted".
+ * One email per player, listing their unpaid events in the tournament. Sent one after another within the
+ * ADMIN daily email limit; the same player, tournament and date is never emailed twice (a double click
+ * or a second run reports them as already sent), but a new date can be sent.
+ */
+router.post("/unpaid-notice", async (req, res) => {
+  const { tournamentId, studentIds, payBy } = unpaidNoticeBody.parse(req.body);
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  if (payBy < today) throw new HttpError(400, "The pay-by date can't be in the past.");
+  const tournament = await prisma.tournament.findUnique({ where: { id: tournamentId }, select: { title: true } });
+  if (!tournament) throw new HttpError(404, "Tournament not found.");
+
+  const unpaid = await prisma.registration.findMany({
+    where: { tournamentId, paymentStatus: "PENDING", fee: { gt: 0 }, ...(studentIds ? { studentId: { in: studentIds } } : {}) },
+    orderBy: { createdAt: "asc" },
+    select: { ageGroup: true, gender: true, weightCategory: true, fee: true, student: { select: { id: true, fullName: true, email: true } } },
+  });
+  const byStudent = new Map<string, { student: (typeof unpaid)[number]["student"]; entries: typeof unpaid }>();
+  for (const r of unpaid) {
+    const group = byStudent.get(r.student.id) ?? { student: r.student, entries: [] };
+    group.entries.push(r);
+    byStudent.set(r.student.id, group);
+  }
+
+  const actor = req.admin?.username || "admin";
+  const counts = { sent: 0, alreadySent: 0, notSent: 0, noEmail: 0 };
+  const notSent: string[] = [];
+  for (const { student, entries } of byStudent.values()) {
+    if (!student.email) { counts.noEmail++; continue; }
+    const delivery = await sendUnpaidDeletionNotice(
+      student.email,
+      {
+        fullName: student.fullName,
+        tournament: tournament.title,
+        events: entries.map((e) => ({ name: `${e.ageGroup} · ${genderLabel(e.gender)} ${e.weightCategory}`, fee: e.fee })),
+        amountDue: entries.reduce((sum, e) => sum + e.fee, 0),
+        payBy: new Date(`${payBy}T12:00:00+05:30`),
+      },
+      { trigger: "ADMIN", actor, studentId: student.id, tournamentId, idempotencyKey: `unpaid-notice:${tournamentId}:${student.id}:${payBy}` },
+    );
+    if (["SENT", "LOGGED", "UNCERTAIN"].includes(delivery.status)) counts.sent++;
+    else if (delivery.status === "DUPLICATE") counts.alreadySent++;
+    else {
+      counts.notSent++;
+      if (notSent.length < 20) notSent.push(`${student.fullName}: ${delivery.error || delivery.status}`);
+    }
+  }
+  console.warn(`[email] ${actor} sent unpaid notices for "${tournament.title}" (pay by ${payBy}): ${JSON.stringify(counts)}`);
+  res.json({ players: byStudent.size, ...counts, notSentDetails: notSent });
 });
 
 export default router;

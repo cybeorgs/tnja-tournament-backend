@@ -149,6 +149,41 @@ export async function sendRegistrationApproved(to: string, s: { fullName: string
   );
 }
 
+/**
+ * Sent by an admin from Payments to a player who still hasn't paid: pay by the given date, or the
+ * registration (the ID, the login and every detail) is deleted from the database.
+ */
+export async function sendUnpaidDeletionNotice(
+  to: string,
+  s: { fullName: string; tournament: string; events: { name: string; fee: number }[]; amountDue: number; payBy: Date },
+  context: EmailContext,
+) {
+  const payBy = s.payBy.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric", timeZone: "Asia/Kolkata" });
+  const rows = s.events
+    .map((e) => `<tr><td style="padding:8px 12px;border-top:1px solid #e2e8f0">${escape(e.name)}</td><td style="padding:8px 12px;border-top:1px solid #e2e8f0;text-align:right;font-weight:700">${rupees(e.fee)}</td></tr>`)
+    .join("");
+  return send("UNPAID_NOTICE", context,
+    to,
+    `Action required: pay your TNJA registration fee by ${payBy}, or your registration will be deleted`,
+    await layout(
+      "Payment pending — final notice",
+      `<p>Dear ${escape(s.fullName)},</p>
+       <p>Your registration for <strong>${escape(s.tournament)}</strong> is still incomplete because the registration fee has not been paid.</p>
+       <div style="border:1px solid #fecaca;background:#fef2f2;border-radius:12px;padding:14px 18px;margin:18px 0">
+         <p style="margin:0;font-weight:700;color:#991b1b">Pay by ${payBy}.</p>
+         <p style="margin:6px 0 0;color:#7f1d1d">If the fee is not paid by then, we will delete your registration — your ID, your login and all the details you entered — from our database. You will not be able to play in the tournament, and you would have to register again from the start.</p>
+         <p style="margin:12px 0 0"><span style="color:#991b1b">Amount due:</span> <strong style="font-size:20px;color:#0f172a">${rupees(s.amountDue)}</strong></p>
+       </div>
+       <table style="width:100%;border-collapse:collapse;border:1px solid #e2e8f0;border-radius:10px;margin:14px 0;font-size:14px">
+         <tr><th style="padding:8px 12px;text-align:left;color:#64748b;font-size:12px">Event</th><th style="padding:8px 12px;text-align:right;color:#64748b;font-size:12px">Fee</th></tr>${rows}
+       </table>
+       ${box("Username", to)}
+       ${env.publicSiteUrl ? button(loginUrl(), "Continue Payment") : ""}
+       <p style="font-size:13px;color:#64748b">Log in with your username and the password from your registration email (forgot it? use "Forgot password?" on the login page), then pay from your account. Already paid in the last few minutes? You can ignore this email.</p>`,
+    ),
+  );
+}
+
 /** After payment (or straight away when free): a Tournament Entry Pass per event, each as its own PDF. */
 export async function sendEntryPasses(to: string, s: { fullName: string; studentNo: string; tournament: string; events: { name: string; passNo: string }[]; pdfs: Attachment[] }, context: EmailContext) {
   const many = s.events.length > 1;

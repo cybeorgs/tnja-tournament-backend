@@ -17,7 +17,7 @@ export const CATEGORY_LABEL: Record<EmailCategory, string> = {
   REGISTRATION: "Registration emails",
   ENTRY_PASS: "Entry passes",
   PASSWORD_RESET: "Password resets",
-  ADMIN: "Admin notifications (approvals)",
+  ADMIN: "Admin notifications (approvals, unpaid notices)",
 };
 
 /** The configured daily limit, or null for none. */
