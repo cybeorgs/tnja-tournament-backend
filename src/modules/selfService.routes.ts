@@ -21,7 +21,6 @@ import { OTP_VALID_MINUTES, assertEmailVerified, checkEmailOtp, createEmailOtp, 
 import { domainAcceptsMail, emailProblem, normaliseEmail, suggestEmail } from "../lib/emailAddress.js";
 import { brevoSuppression, suppress, suppressionOf, suppressionText } from "../lib/emailSuppression.js";
 import { sendEmailOtp } from "../lib/mailer.js";
-import { assertAadhaarVerified } from "../lib/aadhaar.js";
 import { closedReason, newEntryTerms, repriceEntries } from "../lib/fees.js";
 import { entryPassPdf, entryPassReady, loadEntryPass, sendEntryPassesLater } from "../lib/entryPass.js";
 import { confirmPayment, createOrder, createPayToken, readPayToken, verifySchema } from "../lib/payments.js";
@@ -52,8 +51,6 @@ const registerSchema = studentSchema.and(
     agreedToTerms: z.literal(true, { error: "Please agree to the terms and privacy policy" }),
     /** From POST /email-otp/verify (the Verify button next to the email) */
     emailVerificationToken: z.string({ error: "Please verify your email address." }).min(1, "Please verify your email address."),
-    /** From POST /aadhaar/digilocker/check: Aadhaar verified, with its address in the residing pincode */
-    aadhaarVerificationToken: z.string().optional(),
     /** data: URL of the passport-size photograph (JPG/PNG), required for everyone */
     photo: z.string({ error: "Please upload a passport-size photograph." }).min(1, "Please upload a passport-size photograph."),
     /** data: URLs. BPL proof for Tamil Nadu BPL families; proof of nativity for everyone outside Tamil Nadu. */
@@ -75,9 +72,8 @@ const registerSchema = studentSchema.and(
   .refine((r) => !!r.parentPhone, { message: "Enter the parent / emergency contact number", path: ["parentPhone"] });
 
 router.post("/students/register", registerLimiter, async (req, res) => {
-  const { agreedToTerms: _agreed, emailVerificationToken, aadhaarVerificationToken, photo, bplProof, nativityProof, nativityProofLabel, entry, ...form } = registerSchema.parse(req.body);
+  const { agreedToTerms: _agreed, emailVerificationToken, photo, bplProof, nativityProof, nativityProofLabel, entry, ...form } = registerSchema.parse(req.body);
   assertEmailVerified(emailVerificationToken, form.email);
-  assertAadhaarVerified(aadhaarVerificationToken, form.aadhaarNumber, form.residingPincode, form.dob);
   // Coach, manager, district president and secretary are set by the admin only: whatever a player sends is ignored.
   const data = await confirmResidency({ ...form, coachName: "", managerName: "", districtPresident: "", districtSecretary: "" });
   if (!data.representing) throw new HttpError(400, "representing: Choose whether you represent a district or a unit");

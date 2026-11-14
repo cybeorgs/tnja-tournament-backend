@@ -1,11 +1,9 @@
 import type { NextFunction, Request, Response } from "express";
 
 // In-memory fixed-window limiting for a single-process app. Counters reset on restart and are per
-// process, so run the API as one instance for the limits (and the paid-API budgets) to hold.
+// process, so run the API as one instance for the limits to hold.
 
 const MINUTE_MS = 60 * 1000;
-const HOUR_MS = 60 * MINUTE_MS;
-const DAY_MS = 24 * HOUR_MS;
 
 function formatWait(seconds: number): string {
   if (seconds < 60) return `${seconds} seconds`;
@@ -50,35 +48,3 @@ export function rateLimit({ windowMs, max, key = (req) => req.ip || "unknown", m
     next();
   };
 }
-
-/**
- * A daily spending cap across all users for one paid provider, so a bot or a bug can never run
- * up an unbounded bill. Set the limit with the env var; 0 disables the cap.
- */
-export function dailyBudget(envVar: string, defaultMax: number) {
-  return rateLimit({
-    windowMs: DAY_MS,
-    max: Number(process.env[envVar] ?? defaultMax) || Number.MAX_SAFE_INTEGER,
-    key: () => "global",
-    message: "This verification is temporarily unavailable due to high demand.",
-  });
-}
-
-const digitsOf = (value: unknown) => (typeof value === "string" ? value.replace(/\D/g, "") || undefined : undefined);
-
-// Aadhaar verification through DigiLocker is billed per Sandbox call. Same limits as the main TNJA site:
-// per-IP limits are generous because a club may register many players from one office connection;
-// the per-Aadhaar limits stop one number being hammered (a genuine student needs 1–2 sessions, since
-// /resume reuses a session for free). Status calls are also capped per session in aadhaar.routes.ts,
-// and every billed Sandbox call counts against SANDBOX_DAILY_CALL_LIMIT in lib/sandbox.ts.
-export const aadhaarLimits = {
-  start: [
-    rateLimit({ windowMs: HOUR_MS, max: 30, message: "Too many Aadhaar verification attempts from this network." }),
-    rateLimit({ windowMs: HOUR_MS, max: 3, key: (req) => digitsOf(req.body?.aadhaarNumber), message: "Too many verification attempts for this Aadhaar number." }),
-    rateLimit({ windowMs: DAY_MS, max: Number(process.env.AADHAAR_PER_NUMBER_DAILY_LIMIT ?? 6) || Number.MAX_SAFE_INTEGER, key: (req) => digitsOf(req.body?.aadhaarNumber), message: "Too many verification attempts for this Aadhaar number today." }),
-    dailyBudget("AADHAAR_DAILY_LIMIT", 500),
-  ],
-  // Free (no Sandbox call), so only limited against scripted abuse.
-  resume: [rateLimit({ windowMs: 10 * MINUTE_MS, max: 60, message: "Too many verification attempts." })],
-  check: [rateLimit({ windowMs: 10 * MINUTE_MS, max: 120, message: "Too many status checks." })],
-};

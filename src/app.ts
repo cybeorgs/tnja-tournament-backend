@@ -12,7 +12,6 @@ import { drawsRouter, tournamentDrawsRouter } from "./modules/draws.routes.js";
 import certificateRoutes from "./modules/certificates.routes.js";
 import publicRoutes from "./modules/public.routes.js";
 import selfServiceRoutes from "./modules/selfService.routes.js";
-import aadhaarRoutes from "./modules/aadhaar.routes.js";
 import { studentAuthRouter, studentRouter } from "./modules/studentAuth.routes.js";
 import paymentRoutes from "./modules/payments.routes.js";
 import auditRoutes from "./modules/audit.routes.js";
@@ -32,7 +31,6 @@ export function createApp() {
   app.use("/api/auth", authRoutes);
   app.use("/api/public", publicRoutes);
   app.use("/api/public", selfServiceRoutes);
-  app.use("/api/public", aadhaarRoutes);
   app.use("/api/public/units", publicUnitRoutes);
   app.use("/api/student-auth", studentAuthRouter);
   app.use("/api/student", studentRouter);

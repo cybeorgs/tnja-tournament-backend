@@ -10,7 +10,6 @@ import { categoryLabel } from "../lib/certificate.js";
 import type { Entrant, Rounds } from "../lib/bracket.js";
 import { getSettings, param } from "../lib/helpers.js";
 import { publicView } from "./settings.routes.js";
-import { isSandboxConfigured } from "../lib/sandbox.js";
 import { onlinePaymentEnabled } from "../lib/payments.js";
 import { describeDraw } from "./draws.routes.js";
 import { loadRegistrations, officialCertificatesPdf, sendPdf, studentCertificatesPdf } from "./certificates.js";
@@ -19,9 +18,8 @@ const router = Router();
 const VISIBLE = { status: { in: ["PUBLISHED", "COMPLETED"] } };
 
 router.get("/settings", async (_req, res) => {
-  // aadhaarVerification: whether self-registration asks for DigiLocker verification.
   // onlinePayment: whether entry fees can be paid online (Razorpay keys are set).
-  res.json({ ...publicView(await getSettings()), aadhaarVerification: isSandboxConfigured(), onlinePayment: onlinePaymentEnabled() });
+  res.json({ ...publicView(await getSettings()), onlinePayment: onlinePaymentEnabled() });
 });
 
 router.get("/logo", async (_req, res) => {
