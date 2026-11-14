@@ -45,7 +45,7 @@ export const IMPORT_COLUMNS: ImportColumn<Field>[] = [
   { field: "organisationName", header: "Organisation", required: false, aliases: ["organization", "organisationname", "organizationname", "employer", "company", "companyname"], note: "Working professionals", example: "" },
   { field: "occupation", header: "Designation", required: false, aliases: ["designation", "role", "jobtitle", "occupation", "profession"], note: "Working professionals", example: "" },
   { field: "club", header: "Club", required: false, aliases: ["academy", "clubname", "dojo"], note: "", example: "Chennai Judo Club" },
-  { field: "coachName", header: "Coach Name", required: false, aliases: ["coach"], note: "", example: "Ravi M" },
+  { field: "rootCoach", header: "Root Coach", required: false, aliases: ["rootcoachname", "firstcoach", "coach", "coachname"], note: "", example: "Ravi M" },
   { field: "belt", header: "Belt", required: false, aliases: ["beltgrade", "kyu"], note: "", example: "Yellow" },
 ];
 
@@ -140,7 +140,7 @@ function toInput(values: Partial<Record<Field, Cell>>) {
     grade: str(v.grade),
     degreeDepartment: str(v.degreeDepartment),
     club: str(v.club),
-    coachName: str(v.coachName),
+    rootCoach: str(v.rootCoach),
     belt: str(v.belt),
   };
 }

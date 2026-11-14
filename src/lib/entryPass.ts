@@ -6,7 +6,7 @@
 //
 // Each page has the logo, short name, organisation name and registration number (Settings.regNo,
 // "329-2017"), the passport photo, the player's registration details, the event, the additional
-// details (weight, coach, manager, district president and secretary) and blank space to be filled in
+// details (weight, root coach, manager, district president and secretary) and blank space to be filled in
 // by hand at the venue: the weigh-in, remarks and signatures.
 //
 // Registration.hallTicketSentAt records that the event's pass was emailed (the column keeps its old name).
@@ -195,9 +195,9 @@ export async function entryPassPdf({ tournament: t, student: s, entry: e, photo 
   // ── Additional details (blank lines where nothing was given, to fill in by hand) ──
   section("Additional details");
   const extra: [string, string][] = [
-    ["Weight (kg)", s.weightKg ? `${s.weightKg} kg` : ""], ["Coach name", s.coachName],
-    ["Manager name", s.managerName], ["District president", s.districtPresident],
-    ["District secretary", s.districtSecretary],
+    ["Weight (kg)", s.weightKg ? `${s.weightKg} kg` : ""], ["Root coach", s.rootCoach],
+    ["Manager name", s.managerName],
+    ["District president", s.districtPresident], ["District secretary", s.districtSecretary],
   ];
   const halfW = (inner - 16) / 2;
   for (let i = 0; i < extra.length; i += 2) {

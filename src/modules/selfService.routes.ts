@@ -74,8 +74,8 @@ const registerSchema = studentSchema.and(
 router.post("/students/register", registerLimiter, async (req, res) => {
   const { agreedToTerms: _agreed, emailVerificationToken, photo, bplProof, nativityProof, nativityProofLabel, entry, ...form } = registerSchema.parse(req.body);
   assertEmailVerified(emailVerificationToken, form.email);
-  // Coach, manager, district president and secretary are set by the admin only: whatever a player sends is ignored.
-  const data = await confirmResidency({ ...form, coachName: "", managerName: "", districtPresident: "", districtSecretary: "" });
+  // Manager, district president and secretary are set by the admin only: whatever a player sends is ignored.
+  const data = await confirmResidency({ ...form, managerName: "", districtPresident: "", districtSecretary: "" });
   if (!data.representing) throw new HttpError(400, "representing: Choose whether you represent a district or a unit");
 
   const documents: StudentUpload[] = [{ kind: "PHOTO", label: "Passport photo", ...decodeUpload(photo, "The photograph", 1024 * 1024, { imageOnly: true }) }];

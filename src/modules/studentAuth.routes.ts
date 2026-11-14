@@ -125,7 +125,7 @@ studentRouter.get("/me", async (req, res) => {
       fatherName: true, motherName: true, bloodGroup: true, aadhaarNumber: true, phone: true, alternatePhone: true, parentPhone: true, emergencyPhone: true, email: true, nationality: true,
       residingPincode: true, representing: true, representingDistrict: true, representingUnit: true, district: true, taluk: true, address: true, city: true, state: true, pincode: true,
       participantType: true, employmentType: true, organisationName: true, occupation: true,
-      institutionType: true, institutionName: true, grade: true, degreeDepartment: true, club: true, coachName: true, belt: true,
+      institutionType: true, institutionName: true, grade: true, degreeDepartment: true, club: true, rootCoach: true, belt: true,
       registrations: {
         orderBy: { createdAt: "desc" },
         select: {

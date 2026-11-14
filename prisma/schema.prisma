@@ -98,6 +98,8 @@ model Student {
   /// MALE | FEMALE. (Older records may be OTHER: they choose boys' or girls' categories per tournament.)
   gender           String
   club             String   @default("")
+  /// The player's coach (the one who first trained them); entered by the player, printed on the entry pass
+  rootCoach        String   @default("")
   /// Residing / studying district
   district         String   @default("")
   belt             String   @default("")
@@ -147,7 +149,6 @@ model Student {
   organisationName String   @default("")
   /// Designation / role
   occupation       String   @default("")
-  coachName        String   @default("")
   // ── Additional details (printed on the hall ticket) ──
   /// Body weight given at registration, kg (each tournament entry records its own weight too)
   weightKg          Float?

@@ -142,7 +142,7 @@ studentsRouter.get("/export", async (req, res) => {
     { header: "Organisation", width: 28, value: (s) => s.organisationName },
     { header: "Designation", width: 20, value: (s) => s.occupation },
     { header: "Club", width: 22, value: (s) => s.club },
-    { header: "Coach", width: 20, value: (s) => s.coachName },
+    { header: "Root coach", width: 20, value: (s) => s.rootCoach },
     { header: "Belt", value: (s) => s.belt },
     { header: "Documents uploaded", width: 22, value: (s) => s.documents.map((d) => d.label || label(LABEL.document, d.kind)).join(", ") },
     { header: "Registered by", value: (s) => (s.source === "SELF" ? "Self" : "Admin") },

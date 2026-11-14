@@ -105,12 +105,12 @@ export async function registrationPdf(student: Student): Promise<Attachment> {
       ? ["Occupation & club", [
           ["Organisation", `${student.organisationName}${student.employmentType ? ` (${EMPLOYMENT[student.employmentType] ?? student.employmentType})` : ""}`],
           ["Designation", student.occupation],
-          ["Club", student.club || "-"], ["Coach", student.coachName || "-"], ["Belt", student.belt || "-"],
+          ["Club", student.club || "-"], ["Root coach", student.rootCoach || "-"], ["Belt", student.belt || "-"],
         ]]
       : ["Education & club", [
           ["Institution", `${student.institutionName}${student.institutionType ? ` (${INSTITUTION[student.institutionType] ?? student.institutionType})` : ""}`],
           ["Standard / year", student.grade], ...(student.degreeDepartment ? [["Department", student.degreeDepartment] as [string, string]] : []),
-          ["Club", student.club || "-"], ["Coach", student.coachName || "-"], ["Belt", student.belt || "-"],
+          ["Club", student.club || "-"], ["Root coach", student.rootCoach || "-"], ["Belt", student.belt || "-"],
         ]],
   ];
 

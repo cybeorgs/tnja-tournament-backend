@@ -85,7 +85,8 @@ export const studentSchema = z
 
     // Academy (optional)
     club: optional(),
-    coachName: optional(),
+    /** Their coach (the one who first trained them); players enter it themselves */
+    rootCoach: optional(),
     belt: optional(40),
 
     // Additional details (printed on the Tournament Entry Pass). Weight is required when students register themselves.
