@@ -8,7 +8,7 @@ import {
 import type { Entrant } from "../lib/bracket.js";
 import { categoryKey, findTournament, newCertificateNo, param, slugify } from "../lib/helpers.js";
 import { ensureAccount } from "../lib/accounts.js";
-import { adminActor } from "../lib/audit.js";
+import { adminActor, entryLabel, recordPaymentAudit, recordStudentAudit } from "../lib/audit.js";
 import { emailRegistrationLater } from "../lib/registrationEmails.js";
 import { confirmResidency, createStudent, studentSchema } from "../lib/students.js";
 import { closedReason, newEntryTerms, repriceEntries } from "../lib/fees.js";
@@ -411,7 +411,7 @@ const paymentSchema = z.object({
 /** Record a payment taken by hand (or undo it). Paying an event emails its Tournament Entry Pass. */
 router.patch("/:id/registrations/:regId/payment", async (req, res) => {
   const tournamentId = param(req, "id");
-  const existing = await prisma.registration.findFirst({ where: { id: param(req, "regId"), tournamentId } });
+  const existing = await prisma.registration.findFirst({ where: { id: param(req, "regId"), tournamentId }, include: { tournament: { select: { title: true } } } });
   if (!existing) throw notFound("Registration");
   const input = paymentSchema.parse(req.body);
   if (existing.paymentStatus === "WAIVED") throw new HttpError(409, "This entry is free — there is nothing to pay.");
@@ -419,7 +419,13 @@ router.patch("/:id/registrations/:regId/payment", async (req, res) => {
   const data = input.status === "PAID"
     ? { paymentStatus: "PAID", paymentMode: input.mode, amountPaid: existing.fee, paidAt: new Date() }
     : { paymentStatus: "PENDING", paymentMode: null, amountPaid: 0, paidAt: null };
-  const saved = await prisma.registration.update({ where: { id: existing.id }, data, include: { student: true } });
+  // The change and its audit entry are saved together.
+  const saved = await prisma.$transaction(async (tx) => {
+    const updated = await tx.registration.update({ where: { id: existing.id }, data, include: { student: true } });
+    await recordPaymentAudit(tx, updated.student, { ...existing, tournament: existing.tournament.title }, existing, updated, adminActor(req),
+      input.status === "PAID" ? "Marked paid by hand" : "Marked unpaid");
+    return updated;
+  });
   if (input.status === "PAID") sendEntryPassesLater(tournamentId, existing.studentId, { trigger: "ADMIN", actor: req.admin?.username || "admin" });
   res.json(saved);
 });
@@ -436,12 +442,19 @@ router.get("/:id/registrations/:regId/entry-pass", async (req, res) => {
 router.delete("/:id/registrations/:regId", async (req, res) => {
   const tournamentId = param(req, "id");
   const regId = param(req, "regId");
-  const existing = await prisma.registration.findFirst({ where: { id: regId, tournamentId } });
+  const existing = await prisma.registration.findFirst({ where: { id: regId, tournamentId }, include: { student: true, tournament: { select: { title: true } } } });
   if (!existing) throw notFound("Registration");
   if ((await drawsContaining(tournamentId, regId)).length) {
     throw new HttpError(409, "This student is already in a draw. Delete that category's draw before removing them.");
   }
-  await prisma.registration.delete({ where: { id: regId } });
+  // The removal and its audit entry (with the entry's payment at the time) are saved together.
+  await prisma.$transaction(async (tx) => {
+    await tx.registration.delete({ where: { id: regId } });
+    const payment = existing.paymentStatus === "PAID"
+      ? `was paid ₹${existing.amountPaid}${existing.paymentMode ? ` (${existing.paymentMode.toLowerCase()})` : ""}`
+      : existing.paymentStatus === "WAIVED" ? "was free" : `was unpaid (₹${existing.fee} due)`;
+    await recordStudentAudit(tx, existing.student, "ENTRY_REMOVED", adminActor(req), { note: `${entryLabel(existing.tournament.title, existing)} — ${payment}` });
+  });
   // Removing the first category moves the full fee to the player's next unpaid entry.
   await repriceEntries(prisma, tournamentId, existing.studentId);
   res.json({ message: "Registration removed." });

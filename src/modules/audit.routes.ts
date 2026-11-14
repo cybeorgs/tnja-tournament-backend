@@ -9,7 +9,7 @@ const router = Router();
 
 const listQuery = z.object({
   studentId: z.string().uuid().optional(),
-  action: z.enum(["CREATED", "UPDATED", "APPROVED", "REJECTED", "DELETED"]).optional(),
+  action: z.enum(["CREATED", "UPDATED", "APPROVED", "REJECTED", "DELETED", "PAYMENT", "ENTRY_REMOVED"]).optional(),
   q: z.string().trim().max(100).optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(200).default(50),

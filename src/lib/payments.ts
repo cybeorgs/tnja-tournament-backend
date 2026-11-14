@@ -18,6 +18,7 @@ import { env } from "../config/env.js";
 import { HttpError } from "../middleware/errors.js";
 import { sendEntryPassesLater } from "./entryPass.js";
 import { repriceEntries } from "./fees.js";
+import { recordPaymentAudit } from "./audit.js";
 
 export const onlinePaymentEnabled = () => !!env.razorpayKeyId && !!env.razorpayKeySecret;
 
@@ -70,7 +71,10 @@ export function readPayToken(token: unknown): { tournamentId: string; studentId:
  * exact amount. Entries already paid are left alone, so recording the same payment twice is harmless.
  */
 async function recordPayment(tournamentId: string, studentId: string, orderId: string, payment: GatewayPayment) {
-  const entries = await prisma.registration.findMany({ where: { tournamentId, studentId, razorpayOrderId: orderId }, select: { id: true, fee: true, orderFee: true } });
+  const entries = await prisma.registration.findMany({
+    where: { tournamentId, studentId, razorpayOrderId: orderId },
+    select: { id: true, fee: true, orderFee: true, ageGroup: true, gender: true, weightCategory: true, paymentStatus: true, paymentMode: true, amountPaid: true, paidAt: true },
+  });
   if (!entries.length) throw new HttpError(400, "This payment doesn't belong to these entries.");
   if (payment.order_id !== orderId) throw new HttpError(400, "This payment is for a different order.");
 
@@ -89,14 +93,21 @@ async function recordPayment(tournamentId: string, studentId: string, orderId: s
   }
 
   const paidAt = captured.created_at ? new Date(captured.created_at * 1000) : new Date();
-  await prisma.$transaction(
-    entries.map((r) =>
-      prisma.registration.updateMany({
-        where: { id: r.id, paymentStatus: "PENDING" },
-        data: { paymentStatus: "PAID", paymentMode: "RAZORPAY", amountPaid: charged(r), fee: charged(r), razorpayPaymentId: captured.id, paidAt },
-      }),
-    ),
-  );
+  const [student, tournament] = await Promise.all([
+    prisma.student.findUnique({ where: { id: studentId }, select: { id: true, studentNo: true, fullName: true, email: true } }),
+    prisma.tournament.findUnique({ where: { id: tournamentId }, select: { title: true } }),
+  ]);
+  // Each entry this payment actually changes gets an audit entry in the same transaction (one already
+  // marked paid, e.g. the same payment recorded twice, is left alone and not logged again).
+  await prisma.$transaction(async (tx) => {
+    for (const r of entries) {
+      const after = { paymentStatus: "PAID", paymentMode: "RAZORPAY", amountPaid: charged(r), fee: charged(r), paidAt };
+      const { count } = await tx.registration.updateMany({ where: { id: r.id, paymentStatus: "PENDING" }, data: { ...after, razorpayPaymentId: captured.id } });
+      if (count && student) {
+        await recordPaymentAudit(tx, student, { tournament: tournament?.title ?? "", ...r }, r, after, { type: "STUDENT", name: student.email }, `Paid online (Razorpay ${captured.id})`);
+      }
+    }
+  });
   sendEntryPassesLater(tournamentId, studentId, { trigger: "PAYMENT", actor: `Razorpay ${captured.id}` });
 }
 

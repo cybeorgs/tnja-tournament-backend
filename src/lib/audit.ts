@@ -8,7 +8,9 @@ import prisma from "../db.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
-export type AuditAction = "CREATED" | "UPDATED" | "APPROVED" | "REJECTED" | "DELETED";
+/** PAYMENT: an entry's payment changed (marked paid / unpaid by an admin, or paid online). ENTRY_REMOVED: an admin removed a tournament entry. */
+export type AuditAction = "CREATED" | "UPDATED" | "APPROVED" | "REJECTED" | "DELETED" | "PAYMENT" | "ENTRY_REMOVED";
+export const AUDIT_ACTIONS: AuditAction[] = ["CREATED", "UPDATED", "APPROVED", "REJECTED", "DELETED", "PAYMENT", "ENTRY_REMOVED"];
 export type Actor = { type: "ADMIN" | "STUDENT" | "IMPORT"; name: string };
 export type FieldChange = { field: string; label: string; from: string; to: string };
 
@@ -63,6 +65,49 @@ export async function recordStudentAudit(
       actorType: actor.type, actor: actor.name, changes: extra.changes ?? [], note: extra.note ?? "",
     },
   });
+}
+
+// ─── Payments ────────────────────────────────────────────────────────────────
+
+type PaymentState = { paymentStatus: string; paymentMode: string | null; amountPaid: number; fee: number; paidAt: Date | null };
+type EntryRef = { ageGroup: string; gender: string; weightCategory: string };
+
+const PAYMENT_STATUS: Record<string, string> = { PENDING: "Unpaid", PAID: "Paid", WAIVED: "Free" };
+const PAYMENT_MODE: Record<string, string> = { RAZORPAY: "Online", CASH: "Cash", UPI: "UPI", OTHER: "Other" };
+const rupees = (n: number) => `₹${n.toLocaleString("en-IN")}`;
+const when = (d: Date | null) => (d ? d.toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" }) : "");
+
+/** "Super Trophy 2026 · Senior · Boys -73kg" */
+export const entryLabel = (tournament: string, e: EntryRef) => `${tournament} · ${e.ageGroup} · ${e.gender === "FEMALE" ? "Girls" : "Boys"} ${e.weightCategory}`;
+
+/** What changed in an entry's payment, field by field. */
+function diffPayment(before: PaymentState, after: PaymentState): FieldChange[] {
+  const rows: [string, string, string, string][] = [
+    ["paymentStatus", "Payment", PAYMENT_STATUS[before.paymentStatus] ?? before.paymentStatus, PAYMENT_STATUS[after.paymentStatus] ?? after.paymentStatus],
+    ["paymentMode", "Paid by", before.paymentMode ? PAYMENT_MODE[before.paymentMode] ?? before.paymentMode : "", after.paymentMode ? PAYMENT_MODE[after.paymentMode] ?? after.paymentMode : ""],
+    ["amountPaid", "Amount paid", before.amountPaid ? rupees(before.amountPaid) : "", after.amountPaid ? rupees(after.amountPaid) : ""],
+    ["fee", "Entry fee", rupees(before.fee), rupees(after.fee)],
+    ["paidAt", "Paid on", when(before.paidAt), when(after.paidAt)],
+  ];
+  return rows.filter(([, , from, to]) => from !== to).map(([field, label, from, to]) => ({ field, label, from, to }));
+}
+
+/**
+ * Log a change to an entry's payment against the student (shown in Admin → Audit log and on the student).
+ * Nothing is written when nothing changed. Use the same transaction as the change when there is one.
+ */
+export async function recordPaymentAudit(
+  db: Db,
+  student: Pick<Student, "id" | "studentNo" | "fullName">,
+  entry: { tournament: string } & EntryRef,
+  before: PaymentState,
+  after: PaymentState,
+  actor: Actor,
+  note = "",
+) {
+  const changes = diffPayment(before, after);
+  if (!changes.length) return;
+  await recordStudentAudit(db, student, "PAYMENT", actor, { changes, note: [entryLabel(entry.tournament, entry), note].filter(Boolean).join(" — ") });
 }
 
 /** The admin making the request, as the actor of a change. */
