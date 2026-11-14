@@ -9,6 +9,7 @@ import { HttpError } from "../middleware/errors.js";
 import { eligibleAgeGroups, type Gender } from "../lib/categories.js";
 import { findTournament, newCertificateNo, param } from "../lib/helpers.js";
 import { closedReason, newEntryTerms, repriceEntries } from "../lib/fees.js";
+import { recordEntriesAdded } from "../lib/audit.js";
 import { digits, key, readImportSheet, str, templateWorkbook, undeliverable, type Cell, type ImportColumn } from "../lib/importSheet.js";
 import { getJob, startJob } from "../lib/importJobs.js";
 import { resolveCategory } from "./tournaments.routes.js";
@@ -172,6 +173,7 @@ router.post("/registrations/import", express.raw({ type: () => true, limit: "5mb
   const noIdentifier = rows.every((r) => r.values.studentNo === undefined && r.values.aadhaarNumber === undefined);
   const missingColumns = [...missing, ...(noIdentifier ? ["Student ID (or Aadhaar Number)"] : [])];
   const dryRun = req.query.dryRun === "1";
+  const importer = { type: "IMPORT" as const, name: req.admin?.username || "admin" };
 
   // In the background: a big file takes longer than the proxy waits. Poll GET .../import/jobs/:jobId.
   const job = startJob(`entries:${tournament.id}`, req.admin!.adminId, async (job) => {
@@ -200,6 +202,7 @@ router.post("/registrations/import", express.raw({ type: () => true, limit: "5mb
             await tx.registration.create({ data: { tournamentId: tournament.id, studentId: plan.studentId, ...category, ...terms, certificateNo: certificateNos[i]! } });
           }
           await repriceEntries(tx, tournament.id, plan.studentId);
+          await recordEntriesAdded(tx, { id: plan.studentId, studentNo: r.studentNo || null, fullName: r.fullName }, tournament.title, plan.categories, importer, "Excel import");
         });
         entries += plan.categories.length;
         studentIds.push(plan.studentId);

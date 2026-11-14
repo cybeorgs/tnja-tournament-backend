@@ -8,9 +8,26 @@ import prisma from "../db.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
-/** PAYMENT: an entry's payment changed (marked paid / unpaid by an admin, or paid online). ENTRY_REMOVED: an admin removed a tournament entry. */
-export type AuditAction = "CREATED" | "UPDATED" | "APPROVED" | "REJECTED" | "DELETED" | "PAYMENT" | "ENTRY_REMOVED";
-export const AUDIT_ACTIONS: AuditAction[] = ["CREATED", "UPDATED", "APPROVED", "REJECTED", "DELETED", "PAYMENT", "ENTRY_REMOVED"];
+/**
+ * Student record: CREATED, UPDATED, APPROVED, REJECTED, DELETED.
+ * Tournament entries: ENTRY_ADDED, ENTRY_UPDATED (category / weight changed), ENTRY_REMOVED, and
+ * PAYMENT (marked paid / unpaid by an admin, or paid online).
+ */
+export type AuditAction = "CREATED" | "UPDATED" | "APPROVED" | "REJECTED" | "DELETED" | "ENTRY_ADDED" | "ENTRY_UPDATED" | "ENTRY_REMOVED" | "PAYMENT";
+
+/**
+ * The filters of Admin → Audit log, each covering every action of its kind: "Edited" shows edits to the
+ * student and to their entries, "Deleted" shows deleted students and removed entries, and so on.
+ */
+export const AUDIT_FILTERS = {
+  CREATED: ["CREATED", "ENTRY_ADDED"],
+  UPDATED: ["UPDATED", "ENTRY_UPDATED"],
+  APPROVED: ["APPROVED"],
+  REJECTED: ["REJECTED"],
+  DELETED: ["DELETED", "ENTRY_REMOVED"],
+  PAYMENT: ["PAYMENT"],
+} as const satisfies Record<string, readonly AuditAction[]>;
+export type AuditFilter = keyof typeof AUDIT_FILTERS;
 export type Actor = { type: "ADMIN" | "STUDENT" | "IMPORT"; name: string };
 export type FieldChange = { field: string; label: string; from: string; to: string };
 
@@ -108,6 +125,37 @@ export async function recordPaymentAudit(
   const changes = diffPayment(before, after);
   if (!changes.length) return;
   await recordStudentAudit(db, student, "PAYMENT", actor, { changes, note: [entryLabel(entry.tournament, entry), note].filter(Boolean).join(" — ") });
+}
+
+// ─── Tournament entries ──────────────────────────────────────────────────────
+
+type AuditStudent = Pick<Student, "id" | "studentNo" | "fullName">;
+const eventName = (e: EntryRef) => `${e.ageGroup} · ${e.gender === "FEMALE" ? "Girls" : "Boys"} ${e.weightCategory}`;
+
+/** One entry for the events a student was entered in at once (registering, by an admin, or an import). */
+export async function recordEntriesAdded(db: Db, student: AuditStudent, tournament: string, entries: EntryRef[], actor: Actor, note = "") {
+  if (!entries.length) return;
+  await recordStudentAudit(db, student, "ENTRY_ADDED", actor, {
+    note: [`${tournament} — entered in ${entries.map(eventName).join(", ")}`, note].filter(Boolean).join(" — "),
+  });
+}
+
+type EntryState = EntryRef & { weightKg: number | null; weighInStatus: string };
+
+/** An entry's category or weight changed (Edit category). Nothing is written when nothing changed. */
+export async function recordEntryUpdated(db: Db, student: AuditStudent, tournament: string, before: EntryState, after: EntryState, actor: Actor) {
+  const gender = (g: string) => (g === "FEMALE" ? "Girls" : "Boys");
+  const weighIn: Record<string, string> = { PENDING: "Not weighed", CLEARED: "Cleared", DISQUALIFIED: "Disqualified" };
+  const rows: [string, string, string, string][] = [
+    ["ageGroup", "Age group", before.ageGroup, after.ageGroup],
+    ["gender", "Competes in", gender(before.gender), gender(after.gender)],
+    ["weightCategory", "Weight class", before.weightCategory, after.weightCategory],
+    ["weightKg", "Weight (kg)", before.weightKg === null ? "" : String(before.weightKg), after.weightKg === null ? "" : String(after.weightKg)],
+    ["weighInStatus", "Weigh-in", weighIn[before.weighInStatus] ?? before.weighInStatus, weighIn[after.weighInStatus] ?? after.weighInStatus],
+  ];
+  const changes = rows.filter(([, , from, to]) => from !== to).map(([field, label, from, to]) => ({ field, label, from, to }));
+  if (!changes.length) return;
+  await recordStudentAudit(db, student, "ENTRY_UPDATED", actor, { changes, note: entryLabel(tournament, before) });
 }
 
 /** The admin making the request, as the actor of a change. */

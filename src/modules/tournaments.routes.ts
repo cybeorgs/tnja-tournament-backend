@@ -8,7 +8,7 @@ import {
 import type { Entrant } from "../lib/bracket.js";
 import { categoryKey, findTournament, newCertificateNo, param, slugify } from "../lib/helpers.js";
 import { ensureAccount } from "../lib/accounts.js";
-import { adminActor, entryLabel, recordPaymentAudit, recordStudentAudit } from "../lib/audit.js";
+import { adminActor, entryLabel, recordEntriesAdded, recordEntryUpdated, recordPaymentAudit, recordStudentAudit } from "../lib/audit.js";
 import { emailRegistrationLater } from "../lib/registrationEmails.js";
 import { confirmResidency, createStudent, studentSchema } from "../lib/students.js";
 import { closedReason, newEntryTerms, repriceEntries } from "../lib/fees.js";
@@ -321,7 +321,9 @@ router.post("/:id/registrations", async (req, res) => {
     }
     // The player's first category pays the full fee, further ones the additional fee.
     await repriceEntries(tx, tournament.id, studentId);
-    return tx.registration.findMany({ where: { id: { in: ids } }, include: { student: true }, orderBy: { createdAt: "asc" } });
+    const created = await tx.registration.findMany({ where: { id: { in: ids } }, include: { student: true }, orderBy: { createdAt: "asc" } });
+    if (created[0]) await recordEntriesAdded(tx, created[0].student, tournament.title, created, adminActor(req));
+    return created;
   });
   // A student created here gets the registration email (username, password, PDF). In a free
   // event the Tournament Entry Pass is emailed now; otherwise once it is paid.
@@ -352,7 +354,12 @@ router.put("/:id/registrations/:regId", async (req, res) => {
   }
   // A weigh-in only holds for the category it was checked against.
   const weighIn = categoryChanged && existing.weighInStatus !== "PENDING" ? { weighInStatus: "PENDING", weighInKg: null, weighedAt: null } : {};
-  const registration = await prisma.registration.update({ where: { id: existing.id }, data: { ...category, ...weighIn }, include: { student: true } });
+  // The change and its audit entry are saved together.
+  const registration = await prisma.$transaction(async (tx) => {
+    const updated = await tx.registration.update({ where: { id: existing.id }, data: { ...category, ...weighIn }, include: { student: true } });
+    await recordEntryUpdated(tx, existing.student, tournament.title, existing, updated, adminActor(req));
+    return updated;
+  });
   res.json(registration);
 });
 
@@ -374,7 +381,7 @@ const weighInSchema = z.discriminatedUnion("action", [
 
 router.patch("/:id/registrations/:regId/weigh-in", async (req, res) => {
   const tournament = await findTournament(param(req, "id"));
-  const existing = await prisma.registration.findFirst({ where: { id: param(req, "regId"), tournamentId: tournament.id } });
+  const existing = await prisma.registration.findFirst({ where: { id: param(req, "regId"), tournamentId: tournament.id }, include: { student: true } });
   if (!existing) throw notFound("Registration");
   const input = weighInSchema.parse(req.body);
   if ((await drawsContaining(tournament.id, existing.id)).length) {
@@ -399,13 +406,22 @@ router.patch("/:id/registrations/:regId/weigh-in", async (req, res) => {
       data = { weighInStatus: "CLEARED", weighInKg: input.weightKg, weighedAt: now, weightKg: input.weightKg, weightCategory: scaleClass };
     }
   }
-  res.json(await prisma.registration.update({ where: { id: existing.id }, data, include: { student: true } }));
+  // The weigh-in and its audit entry are saved together.
+  res.json(await prisma.$transaction(async (tx) => {
+    const updated = await tx.registration.update({ where: { id: existing.id }, data, include: { student: true } });
+    await recordEntryUpdated(tx, existing.student, tournament.title, existing, updated, adminActor(req));
+    return updated;
+  }));
 });
+
+const PAY_MODE_LABEL = { CASH: "cash", UPI: "UPI", OTHER: "other" } as const;
 
 const paymentSchema = z.object({
   /** PAID: payment received outside the website (cash, UPI…). PENDING: undo that. */
   status: z.enum(["PAID", "PENDING"]),
   mode: z.enum(["CASH", "UPI", "OTHER"]).default("CASH"),
+  /** Why the status is being changed (e.g. the UPI reference, or why it's being undone); kept in the audit log */
+  remark: z.string().trim().min(3, "Enter a remark (at least 3 characters).").max(500, "Keep the remark under 500 characters."),
 });
 
 /** Record a payment taken by hand (or undo it). Paying an event emails its Tournament Entry Pass. */
@@ -423,7 +439,7 @@ router.patch("/:id/registrations/:regId/payment", async (req, res) => {
   const saved = await prisma.$transaction(async (tx) => {
     const updated = await tx.registration.update({ where: { id: existing.id }, data, include: { student: true } });
     await recordPaymentAudit(tx, updated.student, { ...existing, tournament: existing.tournament.title }, existing, updated, adminActor(req),
-      input.status === "PAID" ? "Marked paid by hand" : "Marked unpaid");
+      `${input.status === "PAID" ? `Payment recorded by admin (${PAY_MODE_LABEL[input.mode]})` : "Marked unpaid by admin"} — Remark: ${input.remark}`);
     return updated;
   });
   if (input.status === "PAID") sendEntryPassesLater(tournamentId, existing.studentId, { trigger: "ADMIN", actor: req.admin?.username || "admin" });
@@ -447,13 +463,16 @@ router.delete("/:id/registrations/:regId", async (req, res) => {
   if ((await drawsContaining(tournamentId, regId)).length) {
     throw new HttpError(409, "This student is already in a draw. Delete that category's draw before removing them.");
   }
+  const { reason } = z.object({ reason: z.string().trim().max(500, "Keep the reason under 500 characters.").default("") }).parse(req.body ?? {});
   // The removal and its audit entry (with the entry's payment at the time) are saved together.
   await prisma.$transaction(async (tx) => {
     await tx.registration.delete({ where: { id: regId } });
     const payment = existing.paymentStatus === "PAID"
       ? `was paid ₹${existing.amountPaid}${existing.paymentMode ? ` (${existing.paymentMode.toLowerCase()})` : ""}`
       : existing.paymentStatus === "WAIVED" ? "was free" : `was unpaid (₹${existing.fee} due)`;
-    await recordStudentAudit(tx, existing.student, "ENTRY_REMOVED", adminActor(req), { note: `${entryLabel(existing.tournament.title, existing)} — ${payment}` });
+    await recordStudentAudit(tx, existing.student, "ENTRY_REMOVED", adminActor(req), {
+      note: [entryLabel(existing.tournament.title, existing), payment, reason && `Reason: ${reason}`].filter(Boolean).join(" — "),
+    });
   });
   // Removing the first category moves the full fee to the player's next unpaid entry.
   await repriceEntries(prisma, tournamentId, existing.studentId);

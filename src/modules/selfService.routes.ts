@@ -15,6 +15,7 @@ import { REFEREE_ROLES, eligibleAgeGroups } from "../lib/categories.js";
 import { newCertificateNo, param } from "../lib/helpers.js";
 import { confirmResidency, createStudent, decodeUpload, studentSchema, type StudentUpload } from "../lib/students.js";
 import { ensureAccount } from "../lib/accounts.js";
+import { recordEntriesAdded } from "../lib/audit.js";
 import { TN_LOCATIONS, lookupPincode } from "../lib/locations.js";
 import { emailRegistrationNow, tempIdOf } from "../lib/registrationEmails.js";
 import { OTP_VALID_MINUTES, assertEmailVerified, checkEmailOtp, createEmailOtp, createEmailVerifiedToken, recordDelivery } from "../lib/emailOtp.js";
@@ -117,6 +118,7 @@ router.post("/students/register", registerLimiter, async (req, res) => {
       }
       // First category at the full fee, further ones at the additional fee.
       await repriceEntries(tx, tournament.id, created.id);
+      await recordEntriesAdded(tx, created, tournament.title, categories, { type: "STUDENT", name: created.email }, "Registration form");
     }
     return { student: created, account: await ensureAccount(tx, created.email) };
   });
@@ -332,6 +334,7 @@ router.post("/tournaments/:slug/entry", entryLimiter, async (req, res) => {
       await tx.registration.create({ data: { tournamentId: tournament.id, studentId: student.id, ...category, ...tournament.terms, certificateNo: certificateNos[i]! } });
     }
     await repriceEntries(tx, tournament.id, student.id);
+    await recordEntriesAdded(tx, student, tournament.title, categories, { type: "STUDENT", name: student.email });
   });
 
   sendEntryPassesLater(tournament.id, student.id, { trigger: "SELF", actor: student.email });
