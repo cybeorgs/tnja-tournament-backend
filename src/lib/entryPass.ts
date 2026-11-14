@@ -15,7 +15,7 @@ import type { Registration, Student, Tournament } from "@prisma/client";
 import prisma from "../db.js";
 import { getSettings } from "./helpers.js";
 import { sendEntryPasses, type Attachment } from "./mailer.js";
-import type { EmailCause } from "./registrationEmails.js";
+import { emailRegistrationComplete, type EmailCause } from "./registrationEmails.js";
 
 const INK = rgb(0.06, 0.09, 0.16);
 const MUTED = rgb(0.39, 0.45, 0.55);
@@ -291,6 +291,9 @@ export async function sendEntryPassesIfReady(tournamentId: string, studentId: st
       prisma.registration.findMany({ where: { tournamentId, studentId, hallTicketSentAt: null, paymentStatus: { not: "PENDING" } }, orderBy: { createdAt: "asc" } }),
     ]);
     if (!tournament || !student?.email || !entries.length) return;
+    // A player who was emailed "Registration incomplete" gets "Registration successful" (student ID and
+    // PDF) once paid, ahead of the passes. Does nothing when it already went; never blocks the passes.
+    await emailRegistrationComplete(student, cause).catch((err) => console.error("[registration email] completion failed:", err));
     const photo = await loadPhoto(studentId);
     const pdfs = [];
     for (const entry of entries) pdfs.push(await entryPassPdf({ tournament, student, entry, photo }));

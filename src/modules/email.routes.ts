@@ -9,7 +9,7 @@ import { HOLDABLE_KINDS } from "../lib/emailService.js";
 import { isProductionDeployment, transportMode } from "../lib/emailTransport.js";
 import { normaliseEmail } from "../lib/emailAddress.js";
 import { unsuppress } from "../lib/emailSuppression.js";
-import { emailApproval, emailRegistration } from "../lib/registrationEmails.js";
+import { emailApproval, emailRegistration, emailRegistrationComplete } from "../lib/registrationEmails.js";
 import { sendEntryPassesIfReady } from "../lib/entryPass.js";
 
 const router = Router();
@@ -84,7 +84,16 @@ router.post("/held/send", async (req, res) => {
         counts.gone++;
         continue;
       }
-      const delivery = row.kind === "REGISTRATION_APPROVED" ? await emailApproval(student, cause) : await emailRegistration(student, cause);
+      // A held registration email is regenerated for the student's situation now: one held as "Registration
+      // incomplete" whose fee has since been paid goes out as "Registration successful" (and vice versa).
+      const delivery =
+        row.kind === "REGISTRATION_APPROVED" ? await emailApproval(student, cause)
+        : row.kind === "REGISTRATION_INCOMPLETE" ? ((await emailRegistrationComplete(student, cause)) ?? (await emailRegistration(student, cause)))
+        : await emailRegistration(student, cause);
+      // That newer email has its own record; this held one is then done.
+      if (delivery.status !== "HELD") {
+        await prisma.emailMessage.updateMany({ where: { id: row.id, status: "HELD" }, data: { status: "RELEASED", error: "Sent in a newer email" } });
+      }
       if (["SENT", "LOGGED", "UNCERTAIN", "DUPLICATE"].includes(delivery.status)) counts.sent++;
       else if (delivery.status === "HELD") counts.stillHeld++;
       else counts.failed++;

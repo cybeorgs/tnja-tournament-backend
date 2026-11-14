@@ -55,8 +55,10 @@ async function send(kind: Parameters<typeof deliverEmail>[0]["kind"], context: E
 
 // ─── The registration emails ─────────────────────────────────────────────────
 // Only these go out on their own:
-//   • Tamil Nadu students (approved straight away): registration successful — student ID, username,
-//     password and the registration PDF.
+//   • Tamil Nadu students with an entry fee still to pay: registration incomplete — username, password,
+//     the amount due and a Continue Payment button (no student ID, PDF or entry pass yet).
+//   • Once that fee is paid (or straight away when nothing is due): registration successful — student
+//     ID and the registration PDF (plus the username and password if they weren't sent before).
 //   • Applicants from other states (waiting for approval): application received — a temporary ID,
 //     username and password to log in and follow the status.
 //   • When such an application is approved: registration approved — the student ID and the PDF.
@@ -64,23 +66,57 @@ async function send(kind: Parameters<typeof deliverEmail>[0]["kind"], context: E
 
 type Login = { username: string; password: string | null };
 
-/** Username and password; when the email already had a login (e.g. a sibling), their existing password. */
-const loginBlock = (login: Login) =>
+const rupees = (n: number) => `₹${n.toLocaleString("en-IN")}`;
+
+/** The username/password box, without a button. With no password: the email already had a login (e.g. a sibling). */
+const loginDetails = (login: Login) =>
   `<div style="border:1px solid #e2e8f0;border-radius:12px;padding:14px 18px;margin:18px 0">
      <p style="margin:0 0 6px;font-weight:700;color:#0f172a">Your login</p>
      ${box("Username", login.username)}
      ${login.password ? box("Password", login.password) : `<p style="margin:6px 0;color:#475569">Password: the one you already use for this email.</p>`}
      ${login.password ? `<p style="margin:8px 0 0;font-size:13px;color:#64748b">Keep this password private. You can change it after logging in.</p>` : ""}
-   </div>${loginButton()}`;
+   </div>`;
 
-export async function sendRegistrationSuccess(to: string, s: { fullName: string; studentNo: string; login: Login; pdf: Attachment }, context: EmailContext) {
+/** Username and password, then the Log in button. */
+const loginBlock = (login: Login) => `${loginDetails(login)}${loginButton()}`;
+
+/**
+ * Email 1 for a player with an entry fee still to pay: registration received but incomplete. Username,
+ * password, the amount due and a Continue Payment button. Deliberately no student ID, registration PDF
+ * or entry pass: those come with "Registration successful" once the payment goes through.
+ */
+export async function sendRegistrationIncomplete(to: string, s: { fullName: string; login: Login; amountDue: number }, context: EmailContext) {
+  return send("REGISTRATION_INCOMPLETE", context,
+    to,
+    "Your TNJA Registration Is Incomplete – Complete Your Payment",
+    await layout(
+      "Registration incomplete — payment pending",
+      `<p>We've received ${escape(s.fullName)}'s registration.</p>
+       <div style="border:1px solid #fed7aa;background:#fff7ed;border-radius:12px;padding:14px 18px;margin:18px 0">
+         <p style="margin:0;font-weight:700;color:#9a3412">Your registration is not complete yet.</p>
+         <p style="margin:6px 0 0;color:#7c2d12">It will be complete only after the registration fee is paid successfully. Until then you can't play in the tournament, and no Tournament Entry Pass is issued.</p>
+         <p style="margin:12px 0 0"><span style="color:#9a3412">Registration fee due:</span> <strong style="font-size:20px;color:#0f172a">${rupees(s.amountDue)}</strong></p>
+       </div>
+       ${loginDetails(s.login)}
+       ${env.publicSiteUrl ? button(loginUrl(), "Continue Payment") : ""}
+       <p style="font-size:13px;color:#64748b">Log in with the username and password above and pay from your account. Once the payment is successful we'll email your Student ID and registration confirmation, followed by your Tournament Entry Pass.</p>`,
+    ),
+  );
+}
+
+/**
+ * Email 2: registration successful — student ID and the registration PDF. Sent straight away when nothing
+ * is due, otherwise once the fee is paid. `login` is null when Email 1 already gave the password.
+ */
+export async function sendRegistrationSuccess(to: string, s: { fullName: string; studentNo: string; login: Login | null; pdf: Attachment; afterPayment?: boolean }, context: EmailContext) {
   return send("REGISTRATION_SUCCESS", context,
     to,
     `Registration successful — ${s.studentNo}`,
     await layout(
       "Registration successful",
-      `<p>${escape(s.fullName)} is registered.</p>${box("Student ID", s.studentNo)}
-       <p>The registration confirmation is attached as a PDF.</p>${loginBlock(s.login)}`,
+      `<p>${s.afterPayment ? `Payment received — ${escape(s.fullName)}'s registration is now complete.` : `${escape(s.fullName)} is registered.`}</p>${box("Student ID", s.studentNo)}
+       <p>The registration confirmation is attached as a PDF.${s.afterPayment ? " Your Tournament Entry Pass will be emailed to you separately." : ""}</p>
+       ${s.login ? loginBlock(s.login) : `<p>Log in with the username and password from our earlier email.</p>${loginButton()}`}`,
     ),
     [s.pdf],
   );

@@ -18,11 +18,12 @@ import { suppress, suppressionOf } from "./emailSuppression.js";
 import { budgetDay, releaseEmail, reserveEmail, type EmailCategory } from "./emailBudget.js";
 import { isProductionDeployment, messageIdDomain, routeFor, sendWithRetry, smtpSendOnce, type Attachment } from "./emailTransport.js";
 
-export type EmailKind = "OTP" | "REGISTRATION_SUCCESS" | "APPLICATION_RECEIVED" | "REGISTRATION_APPROVED" | "PASSWORD_RESET" | "ENTRY_PASS";
+export type EmailKind = "OTP" | "REGISTRATION_INCOMPLETE" | "REGISTRATION_SUCCESS" | "APPLICATION_RECEIVED" | "REGISTRATION_APPROVED" | "PASSWORD_RESET" | "ENTRY_PASS";
 export type EmailTrigger = "SELF" | "ADMIN" | "IMPORT" | "PAYMENT" | "SYSTEM";
 
 export const CATEGORY_OF: Record<EmailKind, EmailCategory> = {
   OTP: "OTP",
+  REGISTRATION_INCOMPLETE: "REGISTRATION",
   REGISTRATION_SUCCESS: "REGISTRATION",
   APPLICATION_RECEIVED: "REGISTRATION",
   REGISTRATION_APPROVED: "ADMIN",
@@ -49,7 +50,7 @@ export type Delivery = { to: string; subject: string; status: DeliveryStatus; er
  * Over the daily limit, these are HELD for an admin to release. Codes and reset links are only useful
  * right away, so those are LIMITED instead: the person is told to try later, and nothing is queued.
  */
-export const HOLDABLE_KINDS: EmailKind[] = ["REGISTRATION_SUCCESS", "APPLICATION_RECEIVED", "REGISTRATION_APPROVED", "ENTRY_PASS"];
+export const HOLDABLE_KINDS: EmailKind[] = ["REGISTRATION_INCOMPLETE", "REGISTRATION_SUCCESS", "APPLICATION_RECEIVED", "REGISTRATION_APPROVED", "ENTRY_PASS"];
 
 /** Statuses after which the same logical email may be attempted again (by a later trigger or an admin). */
 export const RETRYABLE_STATUSES = ["FAILED", "HELD", "LIMITED", "SUPPRESSED"];
