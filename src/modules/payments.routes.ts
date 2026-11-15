@@ -8,7 +8,8 @@ import type { Prisma } from "@prisma/client";
 import prisma from "../db.js";
 import { HttpError } from "../middleware/errors.js";
 import { sendUnpaidDeletionNotice } from "../lib/mailer.js";
-import { onlinePaymentEnabled, syncWithRazorpay } from "../lib/payments.js";
+import { onlinePaymentEnabled, resolveReview, syncWithRazorpay } from "../lib/payments.js";
+import { adminActor } from "../lib/audit.js";
 import { DATE, DATE_TIME, sendSheets, sheet } from "../lib/excel.js";
 import {
   buildReport, districtOf, genderLabel, typeLabel, MODE_LABEL, paymentReportPdf, STATUS_LABEL,
@@ -224,14 +225,13 @@ router.get("/razorpay/review", async (_req, res) => {
 
 /** Mark a review order as settled (refunded or sorted out by hand), with what was done. */
 router.post("/razorpay/review/:orderId/resolve", async (req, res) => {
-  const { note } = z.object({ note: z.string().trim().min(3, "Say what was done (e.g. refunded ₹900).").max(500) }).parse(req.body ?? {});
-  const order = await prisma.paymentOrder.findUnique({ where: { id: String(req.params.orderId) } });
-  if (!order || order.status !== "REVIEW") throw new HttpError(404, "No order to review with that id.");
-  await prisma.paymentOrder.update({
-    where: { id: order.id },
-    data: { status: "PAID", note: `${order.note}; resolved by ${req.admin?.username || "admin"}: ${note}` },
-  });
-  res.json({ ok: true });
+  const { note, noRefund } = z.object({
+    note: z.string().trim().min(3, "Pick a quick answer or write a short note.").max(500),
+    /** The player paid once, online: entries marked paid by hand are switched to Online. */
+    noRefund: z.boolean().default(false),
+  }).parse(req.body ?? {});
+  const switched = await resolveReview(String(req.params.orderId), adminActor(req), note, noRefund);
+  res.json({ ok: true, switched });
 });
 
 // ─── Unpaid notice ───────────────────────────────────────────────────────────

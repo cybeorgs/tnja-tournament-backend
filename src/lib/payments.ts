@@ -29,7 +29,7 @@ import { env } from "../config/env.js";
 import { HttpError } from "../middleware/errors.js";
 import { sendEntryPassesLater } from "./entryPass.js";
 import { repriceEntries } from "./fees.js";
-import { recordPaymentAudit } from "./audit.js";
+import { recordPaymentAudit, type Actor } from "./audit.js";
 
 export const onlinePaymentEnabled = () => !!env.razorpayKeyId && !!env.razorpayKeySecret;
 
@@ -215,7 +215,7 @@ export async function recordPayment(orderId: string, payment: GatewayPayment, so
           await adoptHandRecorded(tx, [r], orderId, captured.id);
           continue;
         }
-        problems.push(`${r.ageGroup} ${r.weightCategory} was already ${r.paymentStatus === "PAID" ? `paid (${r.paymentMode ?? "?"})` : r.paymentStatus.toLowerCase()} — refund ₹${line.fee}`);
+        problems.push(`${r.ageGroup} ${r.weightCategory} was already ${r.paymentStatus === "PAID" ? `paid (${r.paymentMode ?? "?"})` : r.paymentStatus.toLowerCase()} — check whether the player paid twice (refund ₹${line.fee} only if so)`);
         continue;
       }
       if (student) {
@@ -490,7 +490,11 @@ async function adminRecordedThisPayment(tx: Tx, entry: Entry, paymentId: string)
 }
 
 /** Those entries were paid by the online payment: show them as paid online (logged in the audit trail). */
-async function adoptHandRecorded(tx: Tx, entries: Entry[], orderId: string, paymentId: string) {
+async function adoptHandRecorded(
+  tx: Tx, entries: Entry[], orderId: string, paymentId: string,
+  actor: Actor = { type: "ADMIN", name: "Sync with Razorpay" },
+  note = `Recorded by hand earlier; matched to online payment ${paymentId} (no second payment — no refund due)`,
+) {
   for (const e of entries) {
     const after = { paymentStatus: "PAID", paymentMode: "RAZORPAY", amountPaid: e.amountPaid, fee: e.fee, paidAt: e.paidAt };
     await tx.registration.update({ where: { id: e.id }, data: { paymentMode: "RAZORPAY", razorpayOrderId: orderId, razorpayPaymentId: paymentId } });
@@ -499,10 +503,34 @@ async function adoptHandRecorded(tx: Tx, entries: Entry[], orderId: string, paym
       tx.tournament.findUnique({ where: { id: e.tournamentId }, select: { title: true } }),
     ]);
     if (student) {
-      await recordPaymentAudit(tx, student, { ...e, tournament: tournament?.title ?? "" }, e, after, { type: "ADMIN", name: "Sync with Razorpay" },
-        `Recorded by hand earlier; matched to online payment ${paymentId} (no second payment — no refund due)`);
+      await recordPaymentAudit(tx, student, { ...e, tournament: tournament?.title ?? "" }, e, after, actor, note);
     }
   }
+}
+
+/**
+ * An admin closes a review order. With `noRefund` (the player paid once, online): the order's entries that
+ * were marked paid by hand (cash/UPI/other) are switched to Online and linked to the Razorpay payment, so
+ * reports count them as online. Nothing is refunded and no amount changes. Returns how many were switched.
+ */
+export async function resolveReview(orderId: string, actor: Actor, note: string, noRefund: boolean): Promise<number> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(hashtext(${`pay:${orderId}`}))`;
+    const order = await tx.paymentOrder.findUnique({ where: { id: orderId } });
+    if (!order || order.status !== "REVIEW") throw new HttpError(404, "No order to review with that id.");
+    let switched: Entry[] = [];
+    if (noRefund && order.paymentId) {
+      const entries = await tx.registration.findMany({ where: { id: { in: linesOf(order).map((l) => l.registrationId) } } });
+      switched = entries.filter((e) => e.paymentStatus === "PAID" && e.paymentMode !== "RAZORPAY");
+      await adoptHandRecorded(tx, switched, order.id, order.paymentId, actor,
+        `Switched to online payment ${order.paymentId} when the review was resolved (paid once online — no refund)`);
+    }
+    await tx.paymentOrder.update({
+      where: { id: order.id },
+      data: { status: "PAID", note: `${order.note}; resolved by ${actor.name}: ${note}${switched.length ? ` (${switched.length} entr${switched.length === 1 ? "y" : "ies"} switched to Online)` : ""}` },
+    });
+    return switched.length;
+  });
 }
 
 /** Every few minutes, while online payment is on: the safety net for a lost browser call and a missed webhook. */
