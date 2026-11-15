@@ -370,16 +370,41 @@ studentsRouter.post("/:id/reject", async (req, res) => {
   res.json(student);
 });
 
+/**
+ * Delete a student and everything of theirs, as long as they never paid: their unpaid (or free) tournament
+ * entries are removed with them. Refused when an entry is paid, Razorpay took money from them, or an entry
+ * is already in a draw. The audit log keeps the record of the deletion (and everything before it) for good.
+ */
 studentsRouter.delete("/:id", async (req, res) => {
-  // Restricted by the Registration foreign key: students with entries can't be deleted.
-  // The audit log keeps the record of the deletion (and everything before it) for good.
-  await prisma.$transaction(async (tx) => {
-    const student = await tx.student.findUnique({ where: { id: param(req, "id") } });
+  const id = param(req, "id");
+  const removed = await prisma.$transaction(async (tx) => {
+    const student = await tx.student.findUnique({ where: { id } });
     if (!student) throw notFound("Student");
-    await tx.student.delete({ where: { id: student.id } });
-    await recordStudentAudit(tx, student, "DELETED", adminActor(req), { note: `${student.fullName}${student.email ? ` (${student.email})` : ""}` });
+    const entries = await tx.registration.findMany({ where: { studentId: id }, include: { tournament: { select: { title: true } } } });
+
+    const paid = entries.filter((e) => e.paymentStatus === "PAID");
+    if (paid.length) {
+      throw new HttpError(409, `${student.fullName} has paid for ${paid.length === 1 ? "an entry" : `${paid.length} entries`} (${paid.map((e) => `${e.tournament.title}: ${e.ageGroup} ${e.weightCategory}`).join("; ")}), so they can't be deleted.`);
+    }
+    if (await tx.paymentOrder.findFirst({ where: { studentId: id, paymentId: { not: null } }, select: { id: true } })) {
+      throw new HttpError(409, `${student.fullName} has an online payment on record (see Payments → online payments), so they can't be deleted.`);
+    }
+    if (entries.length) {
+      const draws = await tx.draw.findMany({ where: { tournamentId: { in: [...new Set(entries.map((e) => e.tournamentId))] } }, select: { entrants: true, ageGroup: true, weightCategory: true } });
+      const ids = new Set(entries.map((e) => e.id));
+      const inDraw = draws.find((d) => (d.entrants as unknown as { id: string }[]).some((x) => ids.has(x.id)));
+      if (inDraw) throw new HttpError(409, `${student.fullName} is in the ${inDraw.ageGroup} ${inDraw.weightCategory} draw. Delete that draw first.`);
+    }
+
+    await tx.registration.deleteMany({ where: { studentId: id } });
+    await tx.student.delete({ where: { id } });
+    const entryNote = entries.length
+      ? ` — with ${entries.length} unpaid entr${entries.length === 1 ? "y" : "ies"}: ${entries.map((e) => `${e.tournament.title} · ${e.ageGroup} ${e.weightCategory}${e.paymentStatus === "WAIVED" ? " (free)" : ` (₹${e.fee} unpaid)`}`).join("; ")}`
+      : "";
+    await recordStudentAudit(tx, student, "DELETED", adminActor(req), { note: `${student.fullName}${student.email ? ` (${student.email})` : ""}${entryNote}` });
+    return entries.length;
   });
-  res.json({ message: "Student deleted." });
+  res.json({ message: removed ? `Student deleted, with ${removed} unpaid entr${removed === 1 ? "y" : "ies"}.` : "Student deleted." });
 });
 
 // ─── Referees ────────────────────────────────────────────────────────────────
