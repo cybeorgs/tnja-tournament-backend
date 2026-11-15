@@ -234,6 +234,94 @@ router.post("/razorpay/review/:orderId/resolve", async (req, res) => {
   res.json({ ok: true, switched });
 });
 
+// ─── Duplicate registrations ─────────────────────────────────────────────────
+
+/** "G.Sanjay", "Sanjay G" and "SANJAY . G" → "g sanjay": letters only, words in any order. */
+const nameKey = (name: string) => name.toLowerCase().split(/[^a-z]+/).filter(Boolean).sort().join(" ");
+const phoneKey = (phone: string) => phone.replace(/\D/g, "").slice(-10);
+const dayKey = (d: Date) => d.toISOString().slice(0, 10);
+
+/**
+ * People entered in a tournament under more than one student record (they filled the form again,
+ * e.g. with a mistyped Aadhaar, and got a second student ID). Two records are the same person when they
+ * share a date of birth and either their name (ignoring dots, spaces, initials' order and case) or their
+ * mobile number. Only groups with an unpaid entry are listed. Nothing is changed here.
+ */
+router.get("/duplicates", async (req, res) => {
+  const { tournamentId } = z.object({ tournamentId: z.string().uuid() }).parse(req.query);
+  const entries = await prisma.registration.findMany({
+    where: { tournamentId },
+    orderBy: { createdAt: "asc" },
+    select: {
+      id: true, ageGroup: true, gender: true, weightCategory: true, fee: true, paymentStatus: true, paymentMode: true, amountPaid: true, createdAt: true,
+      student: { select: { id: true, studentNo: true, fullName: true, dob: true, phone: true, email: true, district: true, aadhaarNumber: true, createdAt: true } },
+    },
+  });
+  type S = (typeof entries)[number]["student"];
+  const students = new Map<string, S>();
+  for (const e of entries) students.set(e.student.id, e.student);
+
+  // Union-find over the two matching rules
+  const parent = new Map<string, string>();
+  const find = (id: string): string => {
+    const p = parent.get(id) ?? id;
+    if (p === id) return id;
+    const root = find(p);
+    parent.set(id, root);
+    return root;
+  };
+  const byKey = new Map<string, string>();
+  const link = (key: string, id: string) => {
+    const other = byKey.get(key);
+    if (!other) byKey.set(key, id);
+    else parent.set(find(id), find(other));
+  };
+  for (const s of students.values()) {
+    const name = nameKey(s.fullName);
+    if (name) link(`n:${dayKey(s.dob)}:${name}`, s.id);
+    const phone = phoneKey(s.phone);
+    if (phone.length === 10) link(`p:${dayKey(s.dob)}:${phone}`, s.id);
+  }
+
+  const groups = new Map<string, S[]>();
+  for (const s of students.values()) groups.set(find(s.id), [...(groups.get(find(s.id)) ?? []), s]);
+
+  const items = [...groups.values()]
+    .filter((g) => g.length > 1)
+    .map((g) => {
+      const records = g
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+        .map((s) => {
+          const own = entries.filter((e) => e.student.id === s.id);
+          return {
+            student: {
+              id: s.id, studentNo: s.studentNo, fullName: s.fullName, dob: s.dob, phone: s.phone, email: s.email, district: s.district,
+              aadhaarLast4: s.aadhaarNumber ? s.aadhaarNumber.slice(-4) : null, registeredAt: s.createdAt,
+            },
+            entries: own.map((e) => ({
+              id: e.id, name: `${e.ageGroup} · ${genderLabel(e.gender)} ${e.weightCategory}`, ageGroup: e.ageGroup, weightCategory: e.weightCategory,
+              fee: e.fee, paymentStatus: e.paymentStatus, paymentMode: e.paymentMode, amountPaid: e.amountPaid, enteredAt: e.createdAt,
+            })),
+          };
+        });
+      const sameName = new Set(g.map((s) => nameKey(s.fullName))).size === 1;
+      const samePhone = new Set(g.map((s) => phoneKey(s.phone))).size === 1;
+      const unpaid = records.flatMap((r) => r.entries).filter((e) => e.paymentStatus === "PENDING");
+      return {
+        matchedOn: [sameName ? "name" : "", samePhone ? "mobile" : "", "date of birth"].filter(Boolean),
+        anyPaid: records.some((r) => r.entries.some((e) => e.paymentStatus !== "PENDING")),
+        unpaidCount: unpaid.length,
+        unpaidTotal: unpaid.reduce((n, e) => n + e.fee, 0),
+        records,
+      };
+    })
+    .filter((g) => g.unpaidCount > 0)
+    // Someone already paid under another record first: those are the clearest duplicates
+    .sort((a, b) => Number(b.anyPaid) - Number(a.anyPaid) || b.unpaidTotal - a.unpaidTotal);
+
+  res.json({ items });
+});
+
 // ─── Unpaid notice ───────────────────────────────────────────────────────────
 
 /**
