@@ -210,6 +210,11 @@ export async function recordPayment(orderId: string, payment: GatewayPayment, so
       if (!count) {
         // Already paid by this very payment (recorded before order records were kept): nothing to do.
         if (r.paymentStatus === "PAID" && r.razorpayPaymentId === captured.id) continue;
+        // An admin recorded this same online payment by hand (their remark quotes its ID): not a second payment.
+        if (r.paymentStatus === "PAID" && r.paymentMode !== "RAZORPAY" && (await adminRecordedThisPayment(tx, r, captured.id))) {
+          await adoptHandRecorded(tx, [r], orderId, captured.id);
+          continue;
+        }
         problems.push(`${r.ageGroup} ${r.weightCategory} was already ${r.paymentStatus === "PAID" ? `paid (${r.paymentMode ?? "?"})` : r.paymentStatus.toLowerCase()} — refund ₹${line.fee}`);
         continue;
       }
@@ -436,17 +441,68 @@ export async function clearFalseReviews(): Promise<number> {
     if (/second payment|removed|but the order was|don't match/i.test(order.note ?? "")) continue;
     const lines = linesOf(order);
     if (!lines.length || sum(lines) !== order.amount) continue;
-    const entries = await prisma.registration.findMany({ where: { id: { in: lines.map((l) => l.registrationId) } } });
-    const allSamePayment = lines.every((l) => entries.some((e) => e.id === l.registrationId && e.paymentStatus === "PAID" && e.razorpayPaymentId === order.paymentId));
-    if (!allSamePayment) continue;
-    const { count } = await prisma.paymentOrder.updateMany({
-      where: { id: order.id, status: "REVIEW" },
-      data: { status: "PAID", note: "Paid (recorded earlier by this same payment; a false \"already paid\" review was cleared)" },
+    const paymentId = order.paymentId!;
+    const done = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(hashtext(${`pay:${order.id}`}))`;
+      const entries = await tx.registration.findMany({ where: { id: { in: lines.map((l) => l.registrationId) } } });
+      const handRecorded: typeof entries = [];
+      for (const l of lines) {
+        const e = entries.find((x) => x.id === l.registrationId);
+        if (!e || e.paymentStatus !== "PAID") return false;
+        if (e.razorpayPaymentId === paymentId) continue;
+        if (e.paymentMode !== "RAZORPAY" && (await adminRecordedThisPayment(tx, e, paymentId))) { handRecorded.push(e); continue; }
+        return false;
+      }
+      await adoptHandRecorded(tx, handRecorded, order.id, paymentId);
+      const { count } = await tx.paymentOrder.updateMany({
+        where: { id: order.id, status: "REVIEW" },
+        data: {
+          status: "PAID",
+          note: handRecorded.length
+            ? "Paid (an admin had recorded this same online payment by hand; entry switched to Online, a false \"already paid\" review was cleared)"
+            : "Paid (recorded earlier by this same payment; a false \"already paid\" review was cleared)",
+        },
+      });
+      return count > 0;
     });
-    cleared += count;
+    if (done) cleared++;
   }
   if (cleared) console.log(`[payments] Cleared ${cleared} false "already paid" review(s)`);
   return cleared;
+}
+
+type Tx = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
+type Entry = Awaited<ReturnType<typeof prisma.registration.findMany>>[number];
+
+/**
+ * An admin marked this entry paid by hand (cash/UPI/other) and their remark quotes this Razorpay payment ID
+ * — i.e. they recorded the same online payment because it was still showing unpaid, not a second payment.
+ */
+async function adminRecordedThisPayment(tx: Tx, entry: Entry, paymentId: string) {
+  const log = await tx.studentAuditLog.findFirst({
+    where: {
+      studentId: entry.studentId, action: "PAYMENT", actorType: "ADMIN",
+      note: { contains: paymentId }, AND: [{ note: { contains: entry.weightCategory } }, { note: { contains: "Payment recorded by admin" } }],
+    },
+    select: { id: true },
+  });
+  return !!log;
+}
+
+/** Those entries were paid by the online payment: show them as paid online (logged in the audit trail). */
+async function adoptHandRecorded(tx: Tx, entries: Entry[], orderId: string, paymentId: string) {
+  for (const e of entries) {
+    const after = { paymentStatus: "PAID", paymentMode: "RAZORPAY", amountPaid: e.amountPaid, fee: e.fee, paidAt: e.paidAt };
+    await tx.registration.update({ where: { id: e.id }, data: { paymentMode: "RAZORPAY", razorpayOrderId: orderId, razorpayPaymentId: paymentId } });
+    const [student, tournament] = await Promise.all([
+      tx.student.findUnique({ where: { id: e.studentId }, select: { id: true, studentNo: true, fullName: true } }),
+      tx.tournament.findUnique({ where: { id: e.tournamentId }, select: { title: true } }),
+    ]);
+    if (student) {
+      await recordPaymentAudit(tx, student, { ...e, tournament: tournament?.title ?? "" }, e, after, { type: "ADMIN", name: "Sync with Razorpay" },
+        `Recorded by hand earlier; matched to online payment ${paymentId} (no second payment — no refund due)`);
+    }
+  }
 }
 
 /** Every few minutes, while online payment is on: the safety net for a lost browser call and a missed webhook. */
