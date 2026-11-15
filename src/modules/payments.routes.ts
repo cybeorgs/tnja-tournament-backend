@@ -8,6 +8,7 @@ import type { Prisma } from "@prisma/client";
 import prisma from "../db.js";
 import { HttpError } from "../middleware/errors.js";
 import { sendUnpaidDeletionNotice } from "../lib/mailer.js";
+import { onlinePaymentEnabled, syncWithRazorpay } from "../lib/payments.js";
 import { DATE, DATE_TIME, sendSheets, sheet } from "../lib/excel.js";
 import {
   buildReport, districtOf, genderLabel, typeLabel, MODE_LABEL, paymentReportPdf, STATUS_LABEL,
@@ -181,6 +182,56 @@ router.get("/export.pdf", async (req, res) => {
   res.setHeader("Content-Disposition", `${download ? "attachment" : "inline"}; filename="${safe}"`);
   res.setHeader("Cache-Control", "no-store");
   res.end(Buffer.from(bytes));
+});
+
+// ─── Razorpay sync ───────────────────────────────────────────────────────────
+
+let syncing = false;
+
+/**
+ * Match every successful Razorpay payment of the last `days` to its order and record any that weren't
+ * (including ones made before order records were kept). Safe to run any time; one run at a time.
+ */
+router.post("/razorpay/sync", async (req, res) => {
+  if (!onlinePaymentEnabled()) throw new HttpError(409, "Online payment isn't set up (no Razorpay keys).");
+  const { days } = z.object({ days: z.coerce.number().int().min(1).max(90).default(30) }).parse(req.body ?? {});
+  if (syncing) throw new HttpError(409, "A sync is already running. Try again in a minute.");
+  syncing = true;
+  try {
+    const result = await syncWithRazorpay(days);
+    console.warn(`[payments] ${req.admin?.username || "admin"} synced with Razorpay (${days} days): ${JSON.stringify(result)}`);
+    res.json(result);
+  } finally {
+    syncing = false;
+  }
+});
+
+/** Paid orders that need an admin (an entry removed or already paid meanwhile, an amount that didn't match). */
+router.get("/razorpay/review", async (_req, res) => {
+  const orders = await prisma.paymentOrder.findMany({ where: { status: "REVIEW" }, orderBy: { updatedAt: "desc" }, take: 200 });
+  const [students, tournaments] = await Promise.all([
+    prisma.student.findMany({ where: { id: { in: orders.map((o) => o.studentId) } }, select: { id: true, studentNo: true, fullName: true, phone: true, email: true } }),
+    prisma.tournament.findMany({ where: { id: { in: orders.map((o) => o.tournamentId) } }, select: { id: true, title: true } }),
+  ]);
+  res.json({
+    items: orders.map((o) => ({
+      orderId: o.id, paymentId: o.paymentId, amount: o.amount, paidAt: o.paidAt, note: o.note, updatedAt: o.updatedAt,
+      student: students.find((s) => s.id === o.studentId) ?? null,
+      tournament: tournaments.find((t) => t.id === o.tournamentId)?.title ?? "",
+    })),
+  });
+});
+
+/** Mark a review order as settled (refunded or sorted out by hand), with what was done. */
+router.post("/razorpay/review/:orderId/resolve", async (req, res) => {
+  const { note } = z.object({ note: z.string().trim().min(3, "Say what was done (e.g. refunded ₹900).").max(500) }).parse(req.body ?? {});
+  const order = await prisma.paymentOrder.findUnique({ where: { id: String(req.params.orderId) } });
+  if (!order || order.status !== "REVIEW") throw new HttpError(404, "No order to review with that id.");
+  await prisma.paymentOrder.update({
+    where: { id: order.id },
+    data: { status: "PAID", note: `${order.note}; resolved by ${req.admin?.username || "admin"}: ${note}` },
+  });
+  res.json({ ok: true });
 });
 
 // ─── Unpaid notice ───────────────────────────────────────────────────────────

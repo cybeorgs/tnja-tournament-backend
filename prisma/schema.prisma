@@ -208,6 +208,33 @@ model StudentAccount {
   updatedAt    DateTime @updatedAt
 }
 
+/// Every Razorpay order ever opened, kept for good: which entries it pays and what each was charged.
+/// A payment is matched through this record, never through Registration.razorpayOrderId (which a newer
+/// order replaces), so a payment that completes after the player opened another order still counts.
+model PaymentOrder {
+  /// Razorpay order id (order_…)
+  id             String    @id
+  tournamentId   String
+  studentId      String
+  /// [{ registrationId, fee }]: the entries in the order and the rupees each was charged
+  lines          Json
+  /// Total in rupees, as sent to Razorpay
+  amount         Int
+  /// CREATED (not paid yet) | PAID | REVIEW (paid, but needs an admin: see note)
+  status         String    @default("CREATED")
+  /// The Razorpay payment that paid it (one payment can only ever pay one order)
+  paymentId      String?   @unique
+  paidAt         DateTime?
+  /// Why it needs review, or how it was confirmed (browser, webhook, sync)
+  note           String    @default("")
+  lastCheckedAt  DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([tournamentId, studentId])
+  @@index([status, createdAt])
+}
+
 model Registration {
   id                String    @id @default(uuid())
   tournamentId      String

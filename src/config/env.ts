@@ -22,6 +22,8 @@ export const env = {
   /** Razorpay API keys for online entry-fee payments (test keys start rzp_test_). Empty = online payment off. */
   razorpayKeyId: process.env.RAZORPAY_KEY_ID || "",
   razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || "",
+  /** The secret entered for the webhook in the Razorpay dashboard (Settings → Webhooks); signs each event */
+  razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET || "",
   smtp: {
     host: process.env.SMTP_HOST || "",
     port: Number(process.env.SMTP_PORT || 587),

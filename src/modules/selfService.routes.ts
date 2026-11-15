@@ -345,14 +345,20 @@ router.post("/tournaments/:slug/entry", entryLimiter, async (req, res) => {
 // The pay token from the registration reply names the tournament and student. Paying later works
 // the same way from the student login (studentAuth.routes.ts).
 
-const payLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30 });
+// Counted per pay token, not per IP: many players pay from the same school / club Wi-Fi or mobile network
+// (one shared IP), and a player who has just paid must never be blocked from confirming it.
+const byPayToken = (req: { body?: { payToken?: unknown }; ip?: string }) =>
+  typeof req.body?.payToken === "string" ? `t:${crypto.createHash("sha256").update(req.body.payToken).digest("hex")}` : `ip:${req.ip ?? "unknown"}`;
+const payLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30, key: byPayToken });
+/** Confirming a payment: generous (it is signature-checked), so a retry after a slow network always gets through */
+const verifyLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 120, key: byPayToken });
 
 router.post("/payments/order", payLimiter, async (req, res) => {
   const { tournamentId, studentId } = readPayToken(req.body?.payToken);
   res.json({ order: await createOrder(tournamentId, studentId) });
 });
 
-router.post("/payments/verify", payLimiter, async (req, res) => {
+router.post("/payments/verify", verifyLimiter, async (req, res) => {
   const { tournamentId, studentId } = readPayToken(req.body?.payToken);
   const entries = await confirmPayment(tournamentId, studentId, verifySchema.parse(req.body));
   res.json({ entries: entries.map(entryView) });

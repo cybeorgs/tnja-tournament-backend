@@ -17,11 +17,25 @@ import paymentRoutes from "./modules/payments.routes.js";
 import auditRoutes from "./modules/audit.routes.js";
 import emailRoutes from "./modules/email.routes.js";
 import unitRoutes, { publicUnitRoutes } from "./modules/units.routes.js";
+import { handleRazorpayWebhook } from "./lib/payments.js";
 
 export function createApp() {
   const app = express();
   app.set("trust proxy", 1); // behind Nginx: req.ip is the real client for rate limiting
   app.use(cors({ origin: env.corsOrigins, exposedHeaders: ["Content-Disposition"] }));
+
+  // Razorpay webhook: before the JSON parser, because its signature is over the exact bytes received.
+  // Point the Razorpay dashboard webhook at https://<api host>/api/public/payments/razorpay-webhook.
+  app.post("/api/public/payments/razorpay-webhook", express.raw({ type: "*/*", limit: "1mb" }), async (req, res, next) => {
+    try {
+      const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      const status = await handleRazorpayWebhook(body, req.get("x-razorpay-signature") ?? "");
+      res.status(status).json({ ok: status === 200 });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.use(express.json({ limit: "6mb" })); // logo, photo and document uploads arrive as base64
 
   app.get("/api/health", (_req, res) => {
