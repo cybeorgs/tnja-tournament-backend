@@ -208,6 +208,8 @@ export async function recordPayment(orderId: string, payment: GatewayPayment, so
       const after = { paymentStatus: "PAID", paymentMode: "RAZORPAY", amountPaid: line.fee, fee: line.fee, paidAt };
       const { count } = await tx.registration.updateMany({ where: { id: r.id, paymentStatus: "PENDING" }, data: { ...after, razorpayOrderId: orderId, razorpayPaymentId: captured.id } });
       if (!count) {
+        // Already paid by this very payment (recorded before order records were kept): nothing to do.
+        if (r.paymentStatus === "PAID" && r.razorpayPaymentId === captured.id) continue;
         problems.push(`${r.ageGroup} ${r.weightCategory} was already ${r.paymentStatus === "PAID" ? `paid (${r.paymentMode ?? "?"})` : r.paymentStatus.toLowerCase()} — refund ₹${line.fee}`);
         continue;
       }
@@ -393,6 +395,7 @@ export async function reconcileOpenOrders(days = 7) {
  * order records were kept, or replaced by a newer order. Then the open orders are checked too.
  */
 export async function syncWithRazorpay(days = 30) {
+  const cleared = await clearFalseReviews();
   const to = Math.floor(Date.now() / 1000);
   const from = to - days * 86_400;
   const counts = { payments: 0, recorded: 0, alreadyRecorded: 0, review: 0, notOurs: 0, errors: 0 };
@@ -418,7 +421,32 @@ export async function syncWithRazorpay(days = 30) {
     if (items.length < 100) break;
   }
   const open = await reconcileOpenOrders(days);
-  return { ...counts, recorded: counts.recorded + open.recorded, review: counts.review + open.review, problems };
+  return { ...counts, recorded: counts.recorded + open.recorded, review: counts.review + open.review, clearedReviews: cleared, problems };
+}
+
+/**
+ * Review orders flagged "already paid — refund" although every entry was paid by this same payment (an
+ * order recovered by Sync whose entries an earlier version had already marked paid). They are fine: mark
+ * them PAID. A second payment for the same order, an amount mismatch or a removed entry stays for review.
+ */
+export async function clearFalseReviews(): Promise<number> {
+  const orders = await prisma.paymentOrder.findMany({ where: { status: "REVIEW", paymentId: { not: null } } });
+  let cleared = 0;
+  for (const order of orders) {
+    if (/second payment|removed|but the order was|don't match/i.test(order.note ?? "")) continue;
+    const lines = linesOf(order);
+    if (!lines.length || sum(lines) !== order.amount) continue;
+    const entries = await prisma.registration.findMany({ where: { id: { in: lines.map((l) => l.registrationId) } } });
+    const allSamePayment = lines.every((l) => entries.some((e) => e.id === l.registrationId && e.paymentStatus === "PAID" && e.razorpayPaymentId === order.paymentId));
+    if (!allSamePayment) continue;
+    const { count } = await prisma.paymentOrder.updateMany({
+      where: { id: order.id, status: "REVIEW" },
+      data: { status: "PAID", note: "Paid (recorded earlier by this same payment; a false \"already paid\" review was cleared)" },
+    });
+    cleared += count;
+  }
+  if (cleared) console.log(`[payments] Cleared ${cleared} false "already paid" review(s)`);
+  return cleared;
 }
 
 /** Every few minutes, while online payment is on: the safety net for a lost browser call and a missed webhook. */
