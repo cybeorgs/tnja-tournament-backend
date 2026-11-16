@@ -7,13 +7,13 @@ import { param } from "../lib/helpers.js";
 import { DOCUMENT_KINDS, PARTICIPANT_TYPES, approveStudent, assertAadhaarFree, confirmResidency, createStudent, studentSchema } from "../lib/students.js";
 import { ensureAccount } from "../lib/accounts.js";
 import { DATE, DATE_TIME, maskAadhaar, sendSheets, sheet, yearAge, type Column } from "../lib/excel.js";
-import { AGE_GROUPS, AGE_GROUP_NAMES, eligibleAgeGroups } from "../lib/categories.js";
+import { AGE_GROUPS, AGE_GROUP_NAMES, eligibleAgeGroups, weightCategoryFor, weightClasses } from "../lib/categories.js";
 import { categoryLabel } from "../lib/certificate.js";
 import { checkRows, readSheet, templateWorkbook } from "../lib/studentImport.js";
 import { getJob, startJob } from "../lib/importJobs.js";
 import { undeliverable } from "../lib/importSheet.js";
 import { emailApproval, emailRegistration, emailRegistrationLater } from "../lib/registrationEmails.js";
-import { adminActor, diffStudent, recordStudentAudit } from "../lib/audit.js";
+import { adminActor, diffStudent, recordEntryUpdated, recordStudentAudit } from "../lib/audit.js";
 
 const listQuery = z.object({
   q: z.string().trim().optional(),
@@ -332,16 +332,52 @@ studentsRouter.put("/:id", async (req, res) => {
   const data = await confirmResidency(studentSchema.parse({ ...req.body, participantType: existing.participantType }));
   const emailChanged = existing.email.toLowerCase() !== data.email;
   await assertAadhaarFree(prisma, data.aadhaarNumber, id);
+  const moves = existing.gender !== data.gender ? await entryMovesForGender(id, data.gender) : [];
   const student = await prisma.$transaction(async (tx) => {
     const updated = await tx.student.update({ where: { id }, data });
     if (emailChanged) await ensureAccount(tx, data.email);
     // The change and its audit entry are saved together (or not at all).
     const changes = diffStudent(existing, updated);
     if (changes.length) await recordStudentAudit(tx, updated, "UPDATED", adminActor(req), { changes });
+    // Gender changed: their entries move to the same age group's boys' / girls' weight class.
+    for (const m of moves) {
+      const moved = await tx.registration.update({ where: { id: m.entry.id }, data: m.data });
+      await recordEntryUpdated(tx, updated, m.entry.tournament.title, m.entry, moved, adminActor(req));
+    }
     return updated;
   });
-  res.json(student);
+  res.json({ ...student, movedEntries: moves.map((m) => `${m.entry.tournament.title}: ${m.entry.ageGroup} ${m.data.gender === "MALE" ? "Boys" : "Girls"} ${m.data.weightCategory}`) });
 });
+
+/**
+ * A student's gender is changing: where each of their entries in tournaments not yet finished would move
+ * (same age group, the new gender's weight class for the weight they entered; a weigh-in is reset).
+ * Refused when an entry is already in a draw or the tournament is for the other gender only.
+ */
+async function entryMovesForGender(studentId: string, gender: string) {
+  if (gender !== "MALE" && gender !== "FEMALE") return [];
+  const entries = await prisma.registration.findMany({
+    where: { studentId, tournament: { status: { not: "COMPLETED" } } },
+    include: { tournament: { select: { id: true, title: true, gender: true } } },
+  });
+  const moves = [];
+  for (const e of entries) {
+    if (e.gender === gender) continue;
+    const label = `${e.tournament.title} (${e.ageGroup} ${e.weightCategory})`;
+    if (e.tournament.gender !== "BOTH" && e.tournament.gender !== gender) {
+      throw new HttpError(409, `${label} is for ${e.tournament.gender === "MALE" ? "boys/men" : "girls/women"} only. Remove that entry before changing the gender.`);
+    }
+    const draws = await prisma.draw.findMany({ where: { tournamentId: e.tournament.id }, select: { entrants: true } });
+    if (draws.some((d) => (d.entrants as unknown as { id: string }[]).some((x) => x.id === e.id))) {
+      throw new HttpError(409, `${label} is already in a draw. Delete that draw before changing the gender.`);
+    }
+    const weightCategory = e.weightKg != null ? weightCategoryFor(e.weightKg, e.ageGroup, gender) : weightClasses(e.ageGroup, gender)[0];
+    if (!weightCategory) throw new HttpError(409, `${label}: ${e.ageGroup} has no ${gender === "MALE" ? "boys'" : "girls'"} weight classes.`);
+    const weighIn = e.weighInStatus !== "PENDING" ? { weighInStatus: "PENDING", weighInKg: null, weighedAt: null } : {};
+    moves.push({ entry: e, data: { gender, weightCategory, ...weighIn } });
+  }
+  return moves;
+}
 
 /** Approve an application from outside Tamil Nadu: issues the permanent ID and emails it with the registration PDF. */
 studentsRouter.post("/:id/approve", async (req, res) => {
