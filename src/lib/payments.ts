@@ -599,7 +599,8 @@ export async function moneyCheck(days = 90) {
 
   const bucket = () => ({ count: 0, amount: 0, items: [] as CheckItem[] });
   const out = {
-    razorpay: { count: payments.length, collected: 0, refunded: 0 },
+    // dashboard*: what Razorpay's dashboard shows as "Collected" (captured payments only; refunded ones are left out)
+    razorpay: { count: payments.length, collected: 0, refunded: 0, dashboardCount: 0, dashboardAmount: 0 },
     recorded: { count: 0, amount: 0, entriesAmount: 0 },
     refunded: bucket(),
     outside: bucket(),
@@ -612,6 +613,7 @@ export async function moneyCheck(days = 90) {
     const refunded = (p.amount_refunded ?? 0) / 100;
     out.razorpay.collected += amount;
     out.razorpay.refunded += refunded;
+    if (p.status === "captured") { out.razorpay.dashboardCount++; out.razorpay.dashboardAmount += amount; }
     const order = p.order_id ? orderById.get(p.order_id) : undefined;
     const mine = linked.filter((r) => r.razorpayPaymentId === p.id);
     const legacyEntry = p.order_id ? legacy.find((r) => r.razorpayOrderId === p.order_id) : undefined;
