@@ -552,3 +552,98 @@ export function startPaymentReconciler(everyMinutes = 5) {
   setTimeout(tick, 60_000).unref();
   setInterval(tick, everyMinutes * 60_000).unref();
 }
+
+// ── Money check: Razorpay's total, explained ──
+
+type ListedPayment = GatewayPayment & {
+  amount_refunded?: number; method?: string; email?: string; contact?: string; description?: string | null;
+  notes?: Record<string, string> | unknown[];
+};
+type CheckItem = {
+  paymentId: string; orderId: string | null; amount: number; refunded: number; method: string; email: string; contact: string;
+  paidAt: string; player: string; note: string;
+  /** The entries this payment paid still show as paid online (a refunded payment then needs a look) */
+  entryStillPaidOnline: boolean;
+};
+
+/**
+ * Every successful Razorpay payment of the last `days`, split by where its money went: recorded on the
+ * website (linked to entries), refunded, not from this website, waiting for review, or ours but not linked
+ * to any entry yet. Next to it, what the website has as paid in the same period, by payment mode.
+ * Read-only: nothing is recorded or changed.
+ */
+export async function moneyCheck(days = 90) {
+  const to = Math.floor(Date.now() / 1000);
+  const from = to - days * 86_400;
+  const payments: ListedPayment[] = [];
+  for (let skip = 0; skip < 20_000; skip += 100) {
+    const { items } = await razorpay<{ items: ListedPayment[] }>("GET", `/payments?from=${from}&to=${to}&count=100&skip=${skip}`);
+    payments.push(...items.filter((p) => p.status === "captured" || p.status === "refunded"));
+    if (items.length < 100) break;
+  }
+
+  const orderIds = [...new Set(payments.map((p) => p.order_id).filter((x): x is string => !!x))];
+  const [orders, linked, legacy] = await Promise.all([
+    prisma.paymentOrder.findMany({ where: { id: { in: orderIds } } }),
+    prisma.registration.findMany({
+      where: { razorpayPaymentId: { in: payments.map((p) => p.id) }, paymentStatus: "PAID" },
+      select: { razorpayPaymentId: true, amountPaid: true, student: { select: { fullName: true, studentNo: true } } },
+    }),
+    // Orders opened before order records were kept still point at entries
+    prisma.registration.findMany({ where: { razorpayOrderId: { in: orderIds } }, select: { razorpayOrderId: true, student: { select: { fullName: true, studentNo: true } } } }),
+  ]);
+  const orderById = new Map(orders.map((o) => [o.id, o]));
+  const studentIds = [...new Set(orders.map((o) => o.studentId))];
+  const students = new Map((await prisma.student.findMany({ where: { id: { in: studentIds } }, select: { id: true, fullName: true, studentNo: true } })).map((s) => [s.id, s]));
+  const who = (s?: { fullName: string; studentNo: string | null } | null) => (s ? `${s.fullName}${s.studentNo ? ` (${s.studentNo})` : ""}` : "");
+
+  const bucket = () => ({ count: 0, amount: 0, items: [] as CheckItem[] });
+  const out = {
+    razorpay: { count: payments.length, collected: 0, refunded: 0 },
+    recorded: { count: 0, amount: 0, entriesAmount: 0 },
+    refunded: bucket(),
+    outside: bucket(),
+    review: bucket(),
+    notLinked: bucket(),
+  };
+
+  for (const p of payments) {
+    const amount = p.amount / 100;
+    const refunded = (p.amount_refunded ?? 0) / 100;
+    out.razorpay.collected += amount;
+    out.razorpay.refunded += refunded;
+    const order = p.order_id ? orderById.get(p.order_id) : undefined;
+    const mine = linked.filter((r) => r.razorpayPaymentId === p.id);
+    const legacyEntry = p.order_id ? legacy.find((r) => r.razorpayOrderId === p.order_id) : undefined;
+    const item: CheckItem = {
+      paymentId: p.id, orderId: p.order_id, amount, refunded, method: p.method ?? "", email: p.email ?? "", contact: p.contact ?? "",
+      paidAt: new Date((p.created_at ?? to) * 1000).toISOString(),
+      player: who(mine[0]?.student) || who(order ? students.get(order.studentId) : null) || who(legacyEntry?.student),
+      note: order?.note ?? (p.description || (Array.isArray(p.notes) ? "" : Object.values(p.notes ?? {}).join(" · "))),
+      entryStillPaidOnline: mine.length > 0,
+    };
+    const add = (b: ReturnType<typeof bucket>, value: number) => { b.count++; b.amount += value; b.items.push(item); };
+
+    if (refunded > 0) add(out.refunded, refunded);
+    const kept = amount - refunded;
+    if (kept <= 0) continue;
+    if (mine.length) {
+      out.recorded.count++;
+      out.recorded.amount += kept;
+      out.recorded.entriesAmount += mine.reduce((n, r) => n + r.amountPaid, 0);
+    } else if (!order && !legacyEntry) add(out.outside, kept);
+    else if (order?.status === "REVIEW") add(out.review, kept);
+    else add(out.notLinked, kept);
+  }
+
+  // What the website has as paid in the same period, by mode
+  const since = new Date(from * 1000);
+  const byMode = await prisma.registration.groupBy({
+    by: ["paymentMode"], where: { paymentStatus: "PAID", paidAt: { gte: since } }, _sum: { amountPaid: true }, _count: true,
+  });
+  const website = Object.fromEntries(byMode.map((m) => [m.paymentMode ?? "UNKNOWN", { count: m._count, amount: m._sum.amountPaid ?? 0 }]));
+
+  const byNewest = (a: CheckItem, b: CheckItem) => b.paidAt.localeCompare(a.paidAt);
+  for (const b of [out.refunded, out.outside, out.review, out.notLinked]) b.items.sort(byNewest);
+  return { days, from: since.toISOString(), ...out, website };
+}

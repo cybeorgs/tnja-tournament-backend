@@ -8,7 +8,7 @@ import type { Prisma } from "@prisma/client";
 import prisma from "../db.js";
 import { HttpError } from "../middleware/errors.js";
 import { sendUnpaidDeletionNotice } from "../lib/mailer.js";
-import { onlinePaymentEnabled, resolveReview, syncWithRazorpay } from "../lib/payments.js";
+import { moneyCheck, onlinePaymentEnabled, resolveReview, syncWithRazorpay } from "../lib/payments.js";
 import { adminActor } from "../lib/audit.js";
 import { DATE, DATE_TIME, sendSheets, sheet } from "../lib/excel.js";
 import {
@@ -205,6 +205,13 @@ router.post("/razorpay/sync", async (req, res) => {
   } finally {
     syncing = false;
   }
+});
+
+/** Razorpay's collected total explained against the website (read-only). */
+router.get("/razorpay/money-check", async (req, res) => {
+  if (!onlinePaymentEnabled()) throw new HttpError(409, "Online payment isn't set up (no Razorpay keys).");
+  const { days } = z.object({ days: z.coerce.number().int().min(1).max(365).default(90) }).parse(req.query);
+  res.json(await moneyCheck(days));
 });
 
 /** Paid orders that need an admin (an entry removed or already paid meanwhile, an amount that didn't match). */
