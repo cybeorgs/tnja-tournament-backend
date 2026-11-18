@@ -29,9 +29,18 @@ function studentWhere(query: unknown) {
   const { q } = z.object({ q: z.string().trim().optional() }).parse(query);
   const status = z.enum(["APPROVED", "PENDING", "REJECTED"]).optional().parse((query as Record<string, unknown>).status || undefined);
   const participantType = z.enum(PARTICIPANT_TYPES).optional().parse((query as Record<string, unknown>).type || undefined);
+  /** UNPAID: owes for at least one entry · PAID: has paid entries and owes nothing · NOT_ENTERED: no entries */
+  const payment = z.enum(["UNPAID", "PAID", "NOT_ENTERED"]).optional().parse((query as Record<string, unknown>).payment || undefined);
+  const owes = { paymentStatus: "PENDING", fee: { gt: 0 } };
+  const paymentWhere =
+    payment === "UNPAID" ? [{ registrations: { some: owes } }]
+    : payment === "PAID" ? [{ registrations: { some: { paymentStatus: "PAID" } } }, { registrations: { none: owes } }]
+    : payment === "NOT_ENTERED" ? [{ registrations: { none: {} } }]
+    : [];
   const where = {
     ...(status ? { status } : {}),
     ...(participantType ? { participantType } : {}),
+    ...(paymentWhere.length ? { AND: paymentWhere } : {}),
     ...(q
       ? { OR: [{ fullName: { contains: q, mode: "insensitive" as const } }, { studentNo: { contains: q, mode: "insensitive" as const } }, { club: { contains: q, mode: "insensitive" as const } }, { phone: { contains: q } }, { email: { contains: q.toLowerCase() } }] }
       : {}),
