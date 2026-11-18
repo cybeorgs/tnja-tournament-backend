@@ -4,7 +4,7 @@ import { z } from "zod";
 import prisma from "../db.js";
 import { HttpError, notFound } from "../middleware/errors.js";
 import { param } from "../lib/helpers.js";
-import { DOCUMENT_KINDS, PARTICIPANT_TYPES, approveStudent, assertAadhaarFree, confirmResidency, createStudent, representingName, representingType, studentSchema } from "../lib/students.js";
+import { DOCUMENT_KINDS, PARTICIPANT_TYPES, approveStudent, assertAadhaarFree, confirmResidency, createStudent, decodeUpload, representingName, representingType, studentSchema } from "../lib/students.js";
 import { ensureAccount } from "../lib/accounts.js";
 import { DATE, DATE_TIME, maskAadhaar, sendSheets, sheet, yearAge, type Column } from "../lib/excel.js";
 import { AGE_GROUPS, AGE_GROUP_NAMES, eligibleAgeGroups, weightCategoryFor, weightClasses } from "../lib/categories.js";
@@ -331,8 +331,27 @@ studentsRouter.get("/:id/documents/:kind", async (req, res) => {
   const doc = await prisma.studentDocument.findUnique({ where: { studentId_kind: { studentId: param(req, "id"), kind } } });
   if (!doc) throw notFound("Document");
   res.setHeader("Content-Type", doc.mime);
-  res.setHeader("Cache-Control", "private, max-age=300");
+  // Not cached: a photo changed by an admin must show straight away.
+  res.setHeader("Cache-Control", "private, no-store");
   res.end(Buffer.from(doc.data));
+});
+
+/** Replace the passport photo (printed on the Tournament Entry Pass). Saved straight away, with a history entry. */
+studentsRouter.put("/:id/photo", async (req, res) => {
+  const student = await prisma.student.findUnique({ where: { id: param(req, "id") } });
+  if (!student) throw notFound("Student");
+  const { photo } = z.object({ photo: z.string().min(1, "Choose a photo.") }).parse(req.body);
+  const file = decodeUpload(photo, "The photograph", 1024 * 1024, { imageOnly: true });
+  await prisma.$transaction(async (tx) => {
+    const had = await tx.studentDocument.findUnique({ where: { studentId_kind: { studentId: student.id, kind: "PHOTO" } }, select: { id: true } });
+    await tx.studentDocument.upsert({
+      where: { studentId_kind: { studentId: student.id, kind: "PHOTO" } },
+      create: { studentId: student.id, kind: "PHOTO", label: "Passport photo", ...file },
+      update: { mime: file.mime, data: file.data, createdAt: new Date() },
+    });
+    await recordStudentAudit(tx, student, "UPDATED", adminActor(req), { note: had ? "Passport photo changed" : "Passport photo added" });
+  });
+  res.json({ message: "Photo saved." });
 });
 
 studentsRouter.put("/:id", async (req, res) => {

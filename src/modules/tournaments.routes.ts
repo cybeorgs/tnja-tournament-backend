@@ -481,6 +481,68 @@ router.delete("/:id/registrations/:regId", async (req, res) => {
   res.json({ message: "Registration removed." });
 });
 
+const deleteUnpaidSchema = z.object({
+  ids: z.array(z.string().uuid()).min(1, "No unpaid entries to delete.").max(5000),
+  reason: z.string().trim().max(500, "Keep the reason under 500 characters.").default(""),
+});
+
+/**
+ * Delete many unpaid entries at once (the ones showing in the admin's filtered list). Each is checked
+ * again here: only entries still unpaid are deleted, never one in a draw or one the player may be paying
+ * for right now (an open Razorpay order from the last 30 minutes, or an order waiting for review).
+ * The students stay in the master list; each removal is written to the student's history.
+ */
+router.post("/:id/registrations/delete-unpaid", async (req, res) => {
+  const tournament = await findTournament(param(req, "id"));
+  const { ids, reason } = deleteUnpaidSchema.parse(req.body);
+  const entries = await prisma.registration.findMany({
+    where: { id: { in: ids }, tournamentId: tournament.id, paymentStatus: "PENDING" },
+    include: { student: true },
+  });
+
+  const drawn = new Set(
+    (await prisma.draw.findMany({ where: { tournamentId: tournament.id }, select: { entrants: true } }))
+      .flatMap((d) => (d.entrants as unknown as Entrant[]).map((e) => e.id)),
+  );
+  const recent = new Date(Date.now() - 30 * 60 * 1000);
+  const openOrders = await prisma.paymentOrder.findMany({
+    where: { tournamentId: tournament.id, OR: [{ status: "REVIEW" }, { status: "CREATED", createdAt: { gte: recent } }] },
+    select: { lines: true },
+  });
+  const paying = new Set(openOrders.flatMap((o) => (o.lines as unknown as { registrationId: string }[]).map((l) => l.registrationId)));
+
+  const toDelete = entries.filter((r) => !drawn.has(r.id) && !paying.has(r.id));
+  const actor = adminActor(req);
+  const done: typeof toDelete = [];
+  await prisma.$transaction(async (tx) => {
+    for (const r of toDelete) {
+      // Deleted only if still unpaid at this moment (a payment may have just come in).
+      const { count } = await tx.registration.deleteMany({ where: { id: r.id, paymentStatus: "PENDING" } });
+      if (!count) continue;
+      done.push(r);
+      await recordStudentAudit(tx, r.student, "ENTRY_REMOVED", actor, {
+        note: [entryLabel(tournament.title, r), `was unpaid (₹${r.fee} due)`, "Deleted with “Delete unpaid entries”", reason && `Reason: ${reason}`].filter(Boolean).join(" — "),
+      });
+    }
+  }, { timeout: 120_000 });
+  // A player's remaining unpaid entries get re-priced (the first one carries the full fee).
+  for (const studentId of new Set(done.map((r) => r.studentId))) await repriceEntries(prisma, tournament.id, studentId);
+
+  const skippedDraw = entries.filter((r) => drawn.has(r.id)).length;
+  const skippedPaying = entries.filter((r) => !drawn.has(r.id) && paying.has(r.id)).length;
+  const notUnpaid = ids.length - entries.length;
+  const skipped = [
+    skippedDraw && `${skippedDraw} in a draw`,
+    skippedPaying && `${skippedPaying} being paid right now or waiting for payment review`,
+    notUnpaid && `${notUnpaid} no longer unpaid`,
+  ].filter(Boolean);
+  res.json({
+    deleted: done.length,
+    players: new Set(done.map((r) => r.studentId)).size,
+    message: `Deleted ${done.length} unpaid entr${done.length === 1 ? "y" : "ies"}.${skipped.length ? ` Kept ${skipped.join(", ")}.` : ""}`,
+  });
+});
+
 // ─── Referees / officials ────────────────────────────────────────────────────
 
 const assignmentSchema = z.object({
