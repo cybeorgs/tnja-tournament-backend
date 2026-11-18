@@ -10,7 +10,7 @@ import { categoryKey, findTournament, newCertificateNo, param, slugify } from ".
 import { ensureAccount } from "../lib/accounts.js";
 import { adminActor, entryLabel, recordEntriesAdded, recordEntryUpdated, recordPaymentAudit, recordStudentAudit } from "../lib/audit.js";
 import { emailRegistrationLater } from "../lib/registrationEmails.js";
-import { confirmResidency, createStudent, studentSchema } from "../lib/students.js";
+import { confirmResidency, createStudent, representingName, representingType, studentSchema } from "../lib/students.js";
 import { closedReason, newEntryTerms, repriceEntries } from "../lib/fees.js";
 import { entryPassPdf, entryPassReady, loadEntryPass, sendEntryPassesLater } from "../lib/entryPass.js";
 import { sendPdf } from "./certificates.js";
@@ -251,6 +251,8 @@ router.get("/:id/registrations/export", async (req, res) => {
     { header: "Root coach", width: 20, value: (r) => r.student.rootCoach },
     { header: "Belt", value: (r) => r.student.belt },
     { header: "District", width: 16, value: (r) => r.student.district },
+    { header: "Representing", width: 12, value: (r) => representingType(r.student) },
+    { header: "Representing district / unit", width: 26, value: (r) => representingName(r.student) },
     { header: "State", width: 16, value: (r) => r.student.state },
     { header: "Phone", width: 14, value: (r) => r.student.phone },
     { header: "Parent / emergency contact", width: 16, value: (r) => r.student.parentPhone || r.student.emergencyPhone },

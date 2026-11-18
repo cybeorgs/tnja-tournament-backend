@@ -4,7 +4,7 @@ import { z } from "zod";
 import prisma from "../db.js";
 import { HttpError, notFound } from "../middleware/errors.js";
 import { param } from "../lib/helpers.js";
-import { DOCUMENT_KINDS, PARTICIPANT_TYPES, approveStudent, assertAadhaarFree, confirmResidency, createStudent, studentSchema } from "../lib/students.js";
+import { DOCUMENT_KINDS, PARTICIPANT_TYPES, approveStudent, assertAadhaarFree, confirmResidency, createStudent, representingName, representingType, studentSchema } from "../lib/students.js";
 import { ensureAccount } from "../lib/accounts.js";
 import { DATE, DATE_TIME, maskAadhaar, sendSheets, sheet, yearAge, type Column } from "../lib/excel.js";
 import { AGE_GROUPS, AGE_GROUP_NAMES, eligibleAgeGroups, weightCategoryFor, weightClasses } from "../lib/categories.js";
@@ -134,8 +134,8 @@ studentsRouter.get("/export", async (req, res) => {
     { header: "Residing pincode", value: (s) => s.residingPincode },
     { header: "District", width: 16, value: (s) => s.district },
     { header: "Taluk", width: 16, value: (s) => s.taluk },
-    { header: "Representing", width: 12, value: (s) => (s.representing === "UNIT" ? "Unit" : s.representing === "DISTRICT" ? "District" : "") },
-    { header: "Represents", width: 24, value: (s) => (s.representing === "UNIT" ? s.representingUnit : s.representingDistrict) },
+    { header: "Representing", width: 12, value: representingType },
+    { header: "Representing district / unit", width: 26, value: representingName },
     { header: "Outside Tamil Nadu", value: (s) => s.outsideTamilNadu },
     { header: "Address", width: 36, value: (s) => s.address },
     { header: "City", width: 16, value: (s) => s.city },
@@ -186,6 +186,8 @@ studentsRouter.get("/export", async (req, res) => {
     { header: "Certificate no.", width: 18, value: (r) => r.certificateNo },
     { header: "Club", width: 22, value: (r) => r.student.club },
     { header: "District", width: 16, value: (r) => r.student.district },
+    { header: "Representing", width: 12, value: (r) => representingType(r.student) },
+    { header: "Representing district / unit", width: 26, value: (r) => representingName(r.student) },
     { header: "Phone", width: 14, value: (r) => r.student.phone },
     { header: "Email", width: 28, value: (r) => r.student.email },
     { header: "Entered on", value: (r) => r.createdAt, format: DATE_TIME },

@@ -253,3 +253,8 @@ export async function approveStudent(tx: Tx, id: string) {
     data: { status: "APPROVED", studentNo: student.studentNo ?? (await nextStudentNo(tx, student.participantType)), reviewNote: "", reviewedAt: new Date() },
   });
 }
+
+/** For Excel exports: whether the player represents a district or a unit, and which one. */
+export const representingType = (s: { representing: string }) => (s.representing === "UNIT" ? "Unit" : s.representing === "DISTRICT" ? "District" : "");
+export const representingName = (s: { representing: string; representingDistrict: string; representingUnit: string }) =>
+  s.representing === "UNIT" ? s.representingUnit : s.representing === "DISTRICT" ? s.representingDistrict : "";
