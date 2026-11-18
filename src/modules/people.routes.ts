@@ -358,8 +358,18 @@ studentsRouter.put("/:id", async (req, res) => {
   const id = param(req, "id");
   const existing = await prisma.student.findUnique({ where: { id } });
   if (!existing) throw notFound("Student");
-  // Student / working professional is fixed at registration (the permanent ID carries it: -S- or -P-).
-  const data = await confirmResidency(studentSchema.parse({ ...req.body, participantType: existing.participantType }));
+  const parsed = await confirmResidency(studentSchema.parse(req.body));
+  // Student ⇄ working professional: the permanent ID carries the type (-S- / -P-), so its letter switches
+  // and the number stays (TNJA-S-000593 → TNJA-P-000593; both share one sequence, so it's never taken).
+  let studentNo = existing.studentNo;
+  if (parsed.participantType !== existing.participantType && studentNo) {
+    const letter = parsed.participantType === "PROFESSIONAL" ? "P" : "S";
+    studentNo = /-[SP]-/.test(studentNo) ? studentNo.replace(/-[SP]-/, `-${letter}-`) : studentNo;
+    if (studentNo !== existing.studentNo && (await prisma.student.findUnique({ where: { studentNo }, select: { id: true } }))) {
+      throw new HttpError(409, `The ID ${studentNo} is already used by another player, so the type can't be changed.`);
+    }
+  }
+  const data = { ...parsed, studentNo };
   const emailChanged = existing.email.toLowerCase() !== data.email;
   await assertAadhaarFree(prisma, data.aadhaarNumber, id);
   const moves = existing.gender !== data.gender ? await entryMovesForGender(id, data.gender) : [];

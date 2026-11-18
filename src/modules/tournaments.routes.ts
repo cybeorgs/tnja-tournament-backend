@@ -466,6 +466,9 @@ router.delete("/:id/registrations/:regId", async (req, res) => {
     throw new HttpError(409, "This student is already in a draw. Delete that category's draw before removing them.");
   }
   const { reason } = z.object({ reason: z.string().trim().max(500, "Keep the reason under 500 characters.").default("") }).parse(req.body ?? {});
+  if (existing.paymentStatus === "PENDING" && (await beingPaid(tournamentId)).has(regId)) {
+    throw new HttpError(409, "The player started paying for this entry in the last 30 minutes (or the payment is waiting for review). Try again later, or check Payments → Razorpay.");
+  }
   // The removal and its audit entry (with the entry's payment at the time) are saved together.
   await prisma.$transaction(async (tx) => {
     await tx.registration.delete({ where: { id: regId } });
@@ -480,6 +483,16 @@ router.delete("/:id/registrations/:regId", async (req, res) => {
   await repriceEntries(prisma, tournamentId, existing.studentId);
   res.json({ message: "Registration removed." });
 });
+
+/** Entries a player may be paying for right now: in a Razorpay order opened in the last 30 minutes, or in one waiting for review. */
+async function beingPaid(tournamentId: string): Promise<Set<string>> {
+  const recent = new Date(Date.now() - 30 * 60 * 1000);
+  const orders = await prisma.paymentOrder.findMany({
+    where: { tournamentId, OR: [{ status: "REVIEW" }, { status: "CREATED", createdAt: { gte: recent } }] },
+    select: { lines: true },
+  });
+  return new Set(orders.flatMap((o) => (o.lines as unknown as { registrationId: string }[]).map((l) => l.registrationId)));
+}
 
 const deleteUnpaidSchema = z.object({
   ids: z.array(z.string().uuid()).min(1, "No unpaid entries to delete.").max(5000),
@@ -504,12 +517,7 @@ router.post("/:id/registrations/delete-unpaid", async (req, res) => {
     (await prisma.draw.findMany({ where: { tournamentId: tournament.id }, select: { entrants: true } }))
       .flatMap((d) => (d.entrants as unknown as Entrant[]).map((e) => e.id)),
   );
-  const recent = new Date(Date.now() - 30 * 60 * 1000);
-  const openOrders = await prisma.paymentOrder.findMany({
-    where: { tournamentId: tournament.id, OR: [{ status: "REVIEW" }, { status: "CREATED", createdAt: { gte: recent } }] },
-    select: { lines: true },
-  });
-  const paying = new Set(openOrders.flatMap((o) => (o.lines as unknown as { registrationId: string }[]).map((l) => l.registrationId)));
+  const paying = await beingPaid(tournament.id);
 
   const toDelete = entries.filter((r) => !drawn.has(r.id) && !paying.has(r.id));
   const actor = adminActor(req);
