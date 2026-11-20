@@ -97,6 +97,88 @@ studentsRouter.get("/stats", async (_req, res) => {
   });
 });
 
+/**
+ * Players entered in more than one category of the same tournament (e.g. a cadet in Cadet, Junior and Senior),
+ * for one tournament (?tournamentId=) or all. ?format=xlsx downloads the list as Excel.
+ */
+studentsRouter.get("/multi-category", async (req, res) => {
+  const tournamentId = z.string().trim().optional().parse(req.query.tournamentId || undefined);
+  const registrations = await prisma.registration.findMany({
+    where: tournamentId ? { tournamentId } : {},
+    select: {
+      tournamentId: true, ageGroup: true, gender: true, weightCategory: true, paymentStatus: true,
+      tournament: { select: { title: true, startDate: true } },
+      student: { select: { id: true, studentNo: true, fullName: true, gender: true, dob: true, club: true, district: true, phone: true } },
+    },
+  });
+  const order = (g: string) => { const i = AGE_GROUP_NAMES.indexOf(g); return i < 0 ? 99 : i; };
+  const byPlayer = new Map<string, typeof registrations>();
+  for (const r of registrations) {
+    const key = `${r.tournamentId}:${r.student.id}`;
+    byPlayer.set(key, [...(byPlayer.get(key) ?? []), r]);
+  }
+  const players = [...byPlayer.values()]
+    .filter((rs) => rs.length > 1)
+    .map((rs) => {
+      const sorted = [...rs].sort((a, b) => order(a.ageGroup) - order(b.ageGroup));
+      const { student, tournament, tournamentId: tid } = sorted[0]!;
+      return {
+        studentId: student.id, studentNo: student.studentNo, fullName: student.fullName, gender: student.gender, dob: student.dob,
+        club: student.club, district: student.district, phone: student.phone,
+        tournamentId: tid, tournamentTitle: tournament.title, tournamentStart: tournament.startDate,
+        combo: sorted.map((r) => r.ageGroup).join(" + "),
+        entries: sorted.map((r) => ({ ageGroup: r.ageGroup, weightCategory: r.weightCategory, label: categoryLabel(r.ageGroup, r.gender, r.weightCategory), paymentStatus: r.paymentStatus })),
+      };
+    })
+    .sort((a, b) => b.entries.length - a.entries.length || a.tournamentTitle.localeCompare(b.tournamentTitle) || a.fullName.localeCompare(b.fullName));
+
+  const tally = (keyOf: (p: (typeof players)[number]) => string | number) => {
+    const m = new Map<string | number, number>();
+    for (const p of players) m.set(keyOf(p), (m.get(keyOf(p)) ?? 0) + 1);
+    return [...m.entries()].map(([key, count]) => ({ key, count })).sort((a, b) => b.count - a.count);
+  };
+  const totalPlayers = byPlayer.size;
+  const summary = {
+    totalPlayers,
+    totalEntries: registrations.length,
+    multiPlayers: players.length,
+    singlePlayers: totalPlayers - players.length,
+    multiEntries: players.reduce((n, p) => n + p.entries.length, 0),
+    byCount: tally((p) => p.entries.length).map(({ key, count }) => ({ categories: Number(key), players: count })).sort((a, b) => a.categories - b.categories),
+    byCombo: tally((p) => p.combo).map(({ key, count }) => ({ combo: String(key), players: count })),
+  };
+
+  if (req.query.format === "xlsx") {
+    type P = (typeof players)[number];
+    const max = Math.max(0, ...players.map((p) => p.entries.length));
+    const columns: Column<P>[] = [
+      { header: "Student ID", width: 16, value: (p) => p.studentNo },
+      { header: "Full name", width: 26, value: (p) => p.fullName },
+      { header: "Gender", value: (p) => label(LABEL.gender, p.gender) },
+      { header: "Date of birth", value: (p) => p.dob, format: DATE },
+      { header: "Tournament", width: 30, value: (p) => p.tournamentTitle },
+      { header: "Age at tournament", value: (p) => yearAge(p.dob, p.tournamentStart) },
+      { header: "No. of categories", value: (p) => p.entries.length },
+      { header: "Age groups", width: 34, value: (p) => p.combo },
+      ...Array.from({ length: max }, (_, i): Column<P> => ({ header: `Category ${i + 1}`, width: 30, value: (p) => p.entries[i]?.label ?? "" })),
+      { header: "Club", width: 22, value: (p) => p.club },
+      { header: "District", width: 16, value: (p) => p.district },
+      { header: "Phone", width: 14, value: (p) => p.phone },
+    ];
+    type C = (typeof summary.byCombo)[number];
+    const comboColumns: Column<C>[] = [
+      { header: "Age groups played", width: 50, value: (c) => c.combo },
+      { header: "Players", value: (c) => c.players },
+    ];
+    await sendSheets(res, `multi-category-players_${new Date().toISOString().slice(0, 10)}.xlsx`, [
+      sheet({ name: "Players", columns, rows: players }),
+      sheet({ name: "By combination", columns: comboColumns, rows: summary.byCombo }),
+    ]);
+    return;
+  }
+  res.json({ ...summary, players });
+});
+
 const LABEL = {
   status: { APPROVED: "Approved", PENDING: "Waiting for approval", REJECTED: "Rejected" } as Record<string, string>,
   gender: { MALE: "Male", FEMALE: "Female", OTHER: "Other" } as Record<string, string>,
