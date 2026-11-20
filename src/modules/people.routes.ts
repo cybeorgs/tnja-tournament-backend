@@ -7,7 +7,7 @@ import { param } from "../lib/helpers.js";
 import { DOCUMENT_KINDS, PARTICIPANT_TYPES, approveStudent, assertAadhaarFree, confirmResidency, createStudent, decodeUpload, representingName, representingType, studentSchema } from "../lib/students.js";
 import { ensureAccount } from "../lib/accounts.js";
 import { DATE, DATE_TIME, maskAadhaar, sendSheets, sheet, yearAge, type Column } from "../lib/excel.js";
-import { AGE_GROUPS, AGE_GROUP_NAMES, eligibleAgeGroups, weightCategoryFor, weightClasses } from "../lib/categories.js";
+import { AGE_GROUPS, AGE_GROUP_NAMES, eligibleAgeGroups, findAgeGroup, weightCategoryFor, weightClasses, yearInIndia, type AgeGroupDef } from "../lib/categories.js";
 import { categoryLabel } from "../lib/certificate.js";
 import { checkRows, readSheet, templateWorkbook } from "../lib/studentImport.js";
 import { getJob, startJob } from "../lib/importJobs.js";
@@ -25,12 +25,26 @@ const listQuery = z.object({
 
 export const studentsRouter = Router();
 
+/** Dates of birth whose age this year (year − birth year) falls in the group's own band, e.g. Cadet 14–16.
+ *  Bands follow the circular, so they can overlap (a 14-year-old is both Sub-Junior and Cadet). */
+function ageGroupDob(group: AgeGroupDef, year = yearInIndia(new Date())) {
+  return { gte: new Date(Date.UTC(year - group.maxAge, 0, 1)), lt: new Date(Date.UTC(year - group.minAge + 1, 0, 1)) };
+}
+
+/** "_cadet" in the export's file name when it is for one age group */
+function ageGroupSlug(query: unknown) {
+  const name = String((query as Record<string, unknown>).ageGroup ?? "");
+  return findAgeGroup(name) ? `_${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}` : "";
+}
+
 function studentWhere(query: unknown) {
   const { q } = z.object({ q: z.string().trim().optional() }).parse(query);
   const status = z.enum(["APPROVED", "PENDING", "REJECTED"]).optional().parse((query as Record<string, unknown>).status || undefined);
   const participantType = z.enum(PARTICIPANT_TYPES).optional().parse((query as Record<string, unknown>).type || undefined);
   /** UNPAID: owes for at least one entry · PAID: has paid entries and owes nothing · NOT_ENTERED: no entries */
   const payment = z.enum(["UNPAID", "PAID", "NOT_ENTERED"]).optional().parse((query as Record<string, unknown>).payment || undefined);
+  const ageGroupName = z.enum(AGE_GROUP_NAMES as [string, ...string[]]).optional().parse((query as Record<string, unknown>).ageGroup || undefined);
+  const ageGroup = ageGroupName ? findAgeGroup(ageGroupName) : undefined;
   const owes = { paymentStatus: "PENDING", fee: { gt: 0 } };
   const paymentWhere =
     payment === "UNPAID" ? [{ registrations: { some: owes } }]
@@ -40,6 +54,7 @@ function studentWhere(query: unknown) {
   const where = {
     ...(status ? { status } : {}),
     ...(participantType ? { participantType } : {}),
+    ...(ageGroup ? { dob: ageGroupDob(ageGroup) } : {}),
     ...(paymentWhere.length ? { AND: paymentWhere } : {}),
     ...(q
       ? { OR: [{ fullName: { contains: q, mode: "insensitive" as const } }, { studentNo: { contains: q, mode: "insensitive" as const } }, { club: { contains: q, mode: "insensitive" as const } }, { phone: { contains: q } }, { email: { contains: q.toLowerCase() } }] }
@@ -66,7 +81,15 @@ studentsRouter.get("/", async (req, res) => {
 studentsRouter.get("/stats", async (_req, res) => {
   const byType = await prisma.student.groupBy({ by: ["participantType", "status"], where: { status: { not: "REJECTED" } }, _count: { _all: true } });
   const count = (match: (r: (typeof byType)[number]) => boolean) => byType.filter(match).reduce((n, r) => n + r._count._all, 0);
+  const year = yearInIndia(new Date());
+  const ageGroups = await Promise.all(
+    AGE_GROUPS.map(async (g) => ({
+      name: g.name, minAge: g.minAge, maxAge: g.maxAge,
+      count: await prisma.student.count({ where: { status: { not: "REJECTED" }, dob: ageGroupDob(g, year) } }),
+    })),
+  );
   res.json({
+    ageGroups,
     total: count(() => true),
     students: count((r) => r.participantType !== "PROFESSIONAL"),
     professionals: count((r) => r.participantType === "PROFESSIONAL"),
@@ -194,7 +217,7 @@ studentsRouter.get("/export", async (req, res) => {
   ];
 
   const stamp = now.toISOString().slice(0, 10);
-  await sendSheets(res, `students${status ? `_${status.toLowerCase()}` : ""}_${stamp}.xlsx`, [
+  await sendSheets(res, `students${status ? `_${status.toLowerCase()}` : ""}${ageGroupSlug(req.query)}_${stamp}.xlsx`, [
     sheet({ name: "Students", columns: studentColumns, rows: students }),
     sheet({ name: "Categories", columns: entryColumns, rows: entries }),
   ]);
